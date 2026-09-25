@@ -27,6 +27,7 @@ const KIND_LABEL: Record<string, string> = {
   no_quote_widen: 'No quotes — search widened',
   no_quote_admin: 'No quotes — needs manual matching',
   no_show: 'Technician not en route',
+  request_unanswered: 'Booking request unanswered — opened to marketplace',
 };
 
 export default function Operations() {

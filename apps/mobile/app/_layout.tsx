@@ -19,6 +19,9 @@ export default function RootLayout() {
           <Stack.Screen name="(admin)" options={{ headerShown: false }} />
           <Stack.Screen name="post-job" options={{ title: 'Post a job', presentation: 'modal' }} />
           <Stack.Screen name="job/[id]" options={{ title: 'Job' }} />
+          <Stack.Screen name="technician/[id]" options={{ title: 'Technician' }} />
+          <Stack.Screen name="chat/[jobId]" options={{ title: 'Chat' }} />
+          <Stack.Screen name="wallet" options={{ title: 'Wallet' }} />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>

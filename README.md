@@ -9,7 +9,7 @@ A multi-sided mobile marketplace connecting **homeowners, offices and SMEs** wit
 | Customer | Post jobs (homeowner, office or SME), compare quotes, track the technician live, pay, review |
 | Technician | Get verified, set services and service radius, quote on nearby jobs, share live location, get paid via split payments |
 | Advertiser | Run sponsored spare-parts campaigns targeted by service category |
-| Admin | Verify technicians, work escalations, review ads, refund payments |
+| Admin | Manage the service taxonomy, verify technicians, work escalations, review ads, refund payments |
 
 ## Repository layout
 
@@ -82,6 +82,78 @@ through the provider that holds the technician's payee account. Money is stored 
 minor units. Webhooks are signature-verified and idempotent (`webhook_events`), and an
 underpayment is rejected.
 
+### Service taxonomy (Section 2)
+
+Categories live in the database, not in code. Migration 002 loads the launch list: 61
+**Household & Office Technical Support** categories and 10 **Construction & Plant
+Erection** categories. The list is mirrored in `packages/shared/src/taxonomy.ts`. After
+that, admins manage categories in the app's **Categories** tab or through
+`/admin/categories`: they can add, rename, re-icon, move between supercategories and
+deactivate. A deactivated category disappears from discovery and can't take new jobs.
+Existing jobs keep it.
+
+Each supercategory has one **"Other / custom"** entry:
+
+- A customer who posts under it has to name the service. The job is held
+  (`awaiting_category_review`) and a suggestion is filed.
+- An admin then approves it as a new category or files it under an existing one. The job
+  moves into that category and technicians are notified.
+- If the admin rejects it, the job goes out under "Other".
+- Technicians can also suggest a trade that isn't listed. On approval it is added to their
+  profile.
+
+### Customer flow (Section 3)
+
+- **Discovery (`GET /discover`):** returns the cards for the app's main browsing screen.
+  Each card has a photo, category icon, rating, starting price, distance and a live dot.
+  - You can filter by supercategory or category, by distance from the customer, and by
+    instant book.
+  - **Boosted** technicians come back in a separate `boosted` list. The app shows them
+    above the organic results with a **Promoted** label.
+  - Organic results are ranked by performance multiplier × rating × proximity.
+  - Live positions come from an "online" heartbeat that technicians send
+    (`PUT /technicians/me/presence`). A position shows only if it is less than 15 minutes
+    old, and it is rounded to about 100 m.
+- **Profile (`GET /technicians/:id`):**
+  - Up to 5 portfolio images, enforced on upload.
+  - Reviews with category-score tags, plus the average for each category.
+  - Certifications, with verified and expired flags.
+  - Labor-only stance: accepts labor-only / case by case / supplies own materials.
+  - The **performance multiplier** (`packages/shared/src/performance.ts`) with its tier and
+    the reasons behind it. It is calculated from rating, completion rate and disputes, and
+    ranges from 0.75 to 1.25. Technicians with fewer than 3 completed jobs stay at 1.00.
+- **Booking modes:**
+  - `open` posts the job to everyone nearby.
+  - `request` sends it to one technician. If they don't respond, the escalation opens it
+    to the whole marketplace.
+  - `instant` books the technician straight away at their listed starting price. The
+    technician has to switch this on.
+- **Masked chat:** there is one thread per job and technician. In-app messages and the
+  WhatsApp relay land in the same thread. Phone numbers, emails, `wa.me`/Telegram links
+  and @handles are replaced with `[contact hidden]` until that technician's quote is
+  approved.
+- **Itemized quotes:** each line is labor, material, transport or other. Technicians can
+  revise a quote, and each revision gets a new number. The customer can:
+  - **approve** the quote as it is,
+  - send a **labor-only** counter, which drops the material lines (blocked if the
+    technician refuses labor-only work),
+  - send a **price challenge**, which needs a lower total and a reason,
+  - **negotiate labor**, which lowers only the labor part.
+
+  The technician accepts the counter, which hires them at that price and records it as an
+  adjustment line, or declines it. There can be only one open counter per quote.
+- **Payment methods:** card, bank transfer to a one-time virtual account, USSD, and the
+  in-app **wallet**. The customer can choose between Paystack and Flutterwave when both
+  support the method.
+  - If the gateway is the one where the technician holds their payout account, the money
+    is split at source.
+  - Otherwise the platform collects the payment and credits the technician's share to
+    their wallet.
+  - Wallet payments settle instantly. The wallet can be topped up through any gateway.
+- **Mandatory reviews:** after every completed job the customer must score all five
+  categories (quality, punctuality, communication, value, professionalism) and write at
+  least 10 characters. Until they do, `POST /jobs` returns `409 review_required`.
+
 ### WhatsApp relay
 
 Customers and technicians message the **platform's** WhatsApp number. Neither side sees the
@@ -106,8 +178,7 @@ docker compose up -d                 # postgres + redis
 cp apps/api/.env.example apps/api/.env
 cp apps/mobile/.env.example apps/mobile/.env
 
-npm run db:migrate
-npm run db:seed                      # service categories for both segments
+npm run db:migrate                   # schema + the launch service taxonomy
 
 npm run dev:api                      # http://localhost:4000
 npm run dev:worker                   # BullMQ worker: escalations + push
@@ -139,14 +210,18 @@ with a warning.
 
 | Area | Endpoints |
 | --- | --- |
-| Account | `POST /auth/register`, `GET/PATCH /me`, `POST /me/push-tokens`, `GET /categories` |
-| Technicians | `PUT /technicians/me`, `PUT /technicians/me/services`, `POST /technicians/me/payout-account`, `POST /technicians/me/portfolio`, `GET /technicians/:id` |
-| Jobs | `POST /jobs`, `GET /jobs[?feed=nearby]`, `GET /jobs/:id`, `POST /jobs/:id/quotes`, `POST /jobs/:id/quotes/:quoteId/accept`, `POST /jobs/:id/status`, `POST /jobs/:id/review` |
-| Payments | `POST /jobs/:id/payments`, `POST /webhooks/payments/:provider` |
+| Account | `POST /auth/register`, `GET/PATCH /me`, `POST /me/push-tokens`, `GET /me/pending-reviews` |
+| Taxonomy | `GET /categories`, `POST /categories/suggestions` |
+| Discovery | `GET /discover` |
+| Technicians | `PUT /technicians/me`, `PUT /technicians/me/presence`, `PUT /technicians/me/services`, `POST /technicians/me/payout-account`, `POST/DELETE /technicians/me/portfolio`, `POST/DELETE /technicians/me/certifications`, `GET /technicians/:id` |
+| Jobs | `POST /jobs`, `GET /jobs[?feed=nearby]`, `GET /jobs/:id`, `POST /jobs/:id/status`, `POST /jobs/:id/review` |
+| Quotes | `POST /jobs/:id/quotes`, `PUT /jobs/:id/quotes/:quoteId`, `POST …/withdraw`, `POST …/accept`, `POST …/counter`, `POST …/counters/:counterId/respond`, `POST …/counters/:counterId/withdraw` |
+| Chat | `GET /jobs/:id/conversations`, `GET/POST /jobs/:id/messages` |
+| Payments | `GET /payments/options`, `POST /jobs/:id/payments`, `GET /wallet`, `POST /wallet/topups`, `POST /webhooks/payments/:provider` |
 | WhatsApp | `GET/POST /webhooks/whatsapp` |
 | Files | `POST /uploads`, `POST /uploads/:id/complete` |
 | Ads | `POST /ads`, `GET /ads/mine`, `POST /ads/:id/status`, `GET /ads/placements`, `POST /ads/:id/click` |
-| Admin | `GET /admin/stats`, `GET /admin/technicians`, `POST /admin/technicians/:id/verification`, `POST /admin/users/:id/active`, `GET /admin/escalations`, `POST /admin/escalations/:id/resolve`, `GET /admin/ads`, `POST /admin/ads/:id/review`, `POST /admin/payments/:id/refund` |
+| Admin | `GET/POST/PATCH /admin/categories`, `GET /admin/category-suggestions`, `POST …/:id/approve`, `POST …/:id/reject`, `GET/POST/DELETE /admin/boosts`, `POST /admin/certifications/:id/verify`, `GET /admin/stats`, `GET /admin/technicians`, `POST /admin/technicians/:id/verification`, `POST /admin/users/:id/active`, `GET /admin/escalations`, `POST /admin/escalations/:id/resolve`, `GET /admin/ads`, `POST /admin/ads/:id/review`, `POST /admin/payments/:id/refund` |
 
 ## Deployment notes
 
@@ -168,6 +243,10 @@ with a warning.
 - **Escrow:** funds are split when the customer pays, after the job is marked completed.
   Holding funds until the customer confirms would mean moving Stripe to separate charges
   and transfers and using delayed settlement on Paystack/Flutterwave.
+- **Boost purchases:** the data model and ranking are in place, but admins grant boosts by
+  hand. Self-serve purchase comes with Section 16.
+- **Wallet withdrawals:** technicians can see what they've earned, but can't pay it out to
+  their bank yet.
 - **Ad billing:** impressions and clicks are counted, but `spent_minor` isn't charged yet.
 - **Search at scale:** matching uses haversine in SQL. Move to PostGIS with a GiST index when
   volume calls for it.

@@ -1,17 +1,20 @@
-import { type JobStatus, toMinor } from '@handiwork/shared';
+import type { JobStatus } from '@handiwork/shared';
 import * as Linking from 'expo-linking';
-import { useLocalSearchParams } from 'expo-router';
-import * as WebBrowser from 'expo-web-browser';
+import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Text, View } from 'react-native';
 import { AdSlot } from '@/components/AdSlot';
 import { LiveMap } from '@/components/LiveMap';
-import { Badge, Button, Card, Chip, colors, ErrorText, Field, Loading, Muted, Screen, styles, Title } from '@/components/ui';
+import { PaymentPicker } from '@/components/PaymentPicker';
+import { QuoteBuilder } from '@/components/QuoteBuilder';
+import { CustomerQuoteCard, TechnicianQuoteCard } from '@/components/QuoteCard';
+import { ReviewForm } from '@/components/ReviewForm';
+import { Badge, Button, colors, ErrorText, Loading, Muted, Screen, styles, Title } from '@/components/ui';
 import { api } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
-import { API_URL } from '@/lib/config';
 import { formatMoney, STATUS_LABEL } from '@/lib/format';
 import { startSharingLocation } from '@/lib/liveLocation';
+import type { Quote } from '@/lib/quotes';
 import { useApi } from '@/lib/useApi';
 
 interface Job {
@@ -28,23 +31,16 @@ interface Job {
   category_id: number;
   budget_minor: number | null;
   currency: string;
-}
-interface Quote {
-  id: string;
-  technician_id: string;
-  technician_name: string;
-  amount_minor: number;
-  currency: string;
-  message: string | null;
-  eta_minutes: number | null;
-  status: string;
-  rating_avg: number;
-  rating_count: number;
+  booking_mode: 'open' | 'request' | 'instant';
+  custom_service_name: string | null;
+  awaiting_category_review: boolean;
+  labor_only: boolean;
 }
 interface Detail {
   job: Job;
   quotes: Quote[];
-  history: { to_status: JobStatus; created_at: string }[];
+  history: { to_status: JobStatus; note: string | null; created_at: string }[];
+  review: { overall: number; comment: string } | null;
   whatsappLink: string | null;
 }
 
@@ -54,6 +50,7 @@ export default function JobDetail() {
   const { data, error, loading, reload } = useApi<Detail>(`/jobs/${id}`);
   const [busy, setBusy] = useState<string | null>(null);
   const [actionError, setActionError] = useState<unknown>(null);
+  const [revising, setRevising] = useState(false);
   const stopSharing = useRef<(() => void) | null>(null);
 
   useEffect(() => () => stopSharing.current?.(), []);
@@ -63,6 +60,8 @@ export default function JobDetail() {
   const { job, quotes, whatsappLink } = data;
   const isCustomer = job.customer_id === user.id;
   const isTech = job.technician_id === user.id;
+  const negotiating = job.status === 'open' || job.status === 'quoted';
+  const myQuote = user.role === 'technician' ? quotes.find((q) => q.technician_id === user.id) : undefined;
 
   const act = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
@@ -77,14 +76,7 @@ export default function JobDetail() {
     }
   };
   const setStatus = (status: string) => act(status, () => api(`/jobs/${job.id}/status`, { body: { status } }));
-
-  const pay = () =>
-    act('pay', async () => {
-      const res = await api<{ checkoutUrl: string | null }>(`/jobs/${job.id}/payments`, { method: 'POST' });
-      if (!res.checkoutUrl) throw new Error('Payment provider did not return a checkout link');
-      // Closes automatically when the provider redirects to our return URL.
-      await WebBrowser.openAuthSessionAsync(res.checkoutUrl, `${API_URL}/v1/payments/return`);
-    });
+  const chatWith = (technicianId: string, name: string) => router.push({ pathname: '/chat/[jobId]', params: { jobId: job.id, technicianId, name } });
 
   return (
     <Screen>
@@ -92,41 +84,54 @@ export default function JobDetail() {
         <Title>{job.title}</Title>
         <Muted>#{job.ref}</Muted>
       </View>
-      <Badge label={STATUS_LABEL[job.status]} tone={job.status === 'paid' ? 'good' : job.status === 'disputed' || job.status === 'cancelled' ? 'bad' : 'neutral'} />
+      <View style={styles.row}>
+        <Badge label={STATUS_LABEL[job.status]} tone={job.status === 'paid' ? 'good' : job.status === 'disputed' || job.status === 'cancelled' ? 'bad' : 'neutral'} />
+        {job.booking_mode !== 'open' && <Badge label={job.booking_mode === 'instant' ? 'Instant booking' : 'Booking request'} />}
+        {job.labor_only && <Badge label="Labor only — you supply materials" tone="warn" />}
+      </View>
+      {job.awaiting_category_review && (
+        <Muted>“{job.custom_service_name}” is being reviewed by our team. Technicians will be notified once it's approved.</Muted>
+      )}
       <Muted>{job.address}</Muted>
       {job.description ? <Text style={{ color: colors.ink }}>{job.description}</Text> : null}
       {job.budget_minor != null && <Text style={{ fontWeight: '600' }}>{formatMoney(job.budget_minor, job.currency)}</Text>}
 
       {(job.status === 'en_route' || job.status === 'in_progress') && isCustomer && <LiveMap jobId={job.id} job={job} />}
 
-      {whatsappLink && (
-        <Button title="Message on WhatsApp" variant="whatsapp" onPress={() => Linking.openURL(whatsappLink)} />
+      {whatsappLink && <Button title="Message on WhatsApp" variant="whatsapp" onPress={() => Linking.openURL(whatsappLink)} />}
+      {job.technician_id && (isCustomer || isTech) && (
+        <Button title="Open chat" variant="secondary" onPress={() => chatWith(job.technician_id!, isCustomer ? 'Technician' : 'Customer')} />
       )}
 
-      {/* ---------- customer: quotes ---------- */}
-      {isCustomer && (job.status === 'open' || job.status === 'quoted') && (
+      {/* ---------- customer: compare & negotiate itemized quotes ---------- */}
+      {isCustomer && negotiating && (
         <>
           <Text style={styles.label}>Quotes</Text>
-          {quotes.length === 0 && <Muted>Waiting for quotes from nearby technicians…</Muted>}
-          {quotes.map((q) => (
-            <Card key={q.id}>
-              <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
-                <Text style={{ fontWeight: '600' }}>{q.technician_name}</Text>
-                <Text style={{ fontWeight: '700' }}>{formatMoney(q.amount_minor, q.currency)}</Text>
-              </View>
-              <Muted>
-                ★ {Number(q.rating_avg).toFixed(1)} ({q.rating_count}){q.eta_minutes ? ` · ETA ${q.eta_minutes} min` : ''}
-              </Muted>
-              {q.message ? <Text>{q.message}</Text> : null}
-              <Button title="Accept quote" loading={busy === q.id} onPress={() => act(q.id, () => api(`/jobs/${job.id}/quotes/${q.id}/accept`, { method: 'POST' }))} />
-            </Card>
-          ))}
+          {quotes.length === 0 && <Muted>Waiting for quotes…</Muted>}
+          {quotes
+            .filter((q) => q.status === 'pending' || q.status === 'countered')
+            .map((q) => (
+              <CustomerQuoteCard key={q.id} jobId={job.id} quote={q} open onChange={reload} />
+            ))}
         </>
       )}
+      {isCustomer && !negotiating && quotes.filter((q) => q.status === 'accepted').map((q) => <CustomerQuoteCard key={q.id} jobId={job.id} quote={q} open={false} onChange={reload} />)}
 
-      {/* ---------- technician: quote on an open job ---------- */}
-      {user.role === 'technician' && !isTech && (job.status === 'open' || job.status === 'quoted') && (
-        <QuoteForm jobId={job.id} currency={job.currency} existing={quotes[0]} onDone={reload} />
+      {/* ---------- technician: quote / revise / respond to counters ---------- */}
+      {user.role === 'technician' && negotiating && (!myQuote || revising) && (
+        <QuoteBuilder
+          jobId={job.id}
+          currency={job.currency}
+          existing={revising ? myQuote : undefined}
+          onDone={() => {
+            setRevising(false);
+            void reload();
+          }}
+        />
+      )}
+      {myQuote && !revising && <TechnicianQuoteCard jobId={job.id} quote={myQuote} onRevise={() => setRevising(true)} onChange={reload} />}
+      {user.role === 'technician' && negotiating && (
+        <Button title="Ask the customer a question" variant="secondary" onPress={() => chatWith(user.id, 'Customer')} />
       )}
 
       {/* ---------- technician: progress the job ---------- */}
@@ -152,18 +157,21 @@ export default function JobDetail() {
           }}
         />
       )}
-      {isTech && job.status === 'in_progress' && (
-        <Button title="Mark job completed" loading={busy === 'completed'} onPress={() => setStatus('completed')} />
-      )}
+      {isTech && job.status === 'in_progress' && <Button title="Mark job completed" loading={busy === 'completed'} onPress={() => setStatus('completed')} />}
 
-      {/* ---------- customer: pay & review ---------- */}
-      {isCustomer && job.status === 'completed' && (
-        <Button title={`Pay ${formatMoney(job.budget_minor, job.currency)}`} loading={busy === 'pay'} onPress={pay} />
+      {/* ---------- customer: pay & mandatory review ---------- */}
+      {isCustomer && job.status === 'completed' && job.budget_minor != null && (
+        <PaymentPicker jobId={job.id} amountMinor={job.budget_minor} currency={job.currency} onPaid={reload} />
       )}
-      {isCustomer && (job.status === 'completed' || job.status === 'paid') && <ReviewForm jobId={job.id} />}
+      {isCustomer && (job.status === 'completed' || job.status === 'paid') && !data.review && <ReviewForm jobId={job.id} onDone={reload} />}
+      {data.review && (
+        <Muted>
+          Your review: ★ {Number(data.review.overall).toFixed(1)} — “{data.review.comment}”
+        </Muted>
+      )}
 
       {/* ---------- cancel / dispute ---------- */}
-      {(isCustomer || isTech) && ['open', 'quoted', 'assigned'].includes(job.status) && (isCustomer || job.status === 'assigned') && (
+      {((isCustomer && ['open', 'quoted', 'assigned'].includes(job.status)) || (isTech && job.status === 'assigned')) && (
         <Button
           title="Cancel job"
           variant="secondary"
@@ -189,78 +197,5 @@ export default function JobDetail() {
         </Muted>
       ))}
     </Screen>
-  );
-}
-
-function QuoteForm({ jobId, currency, existing, onDone }: { jobId: string; currency: string; existing?: Quote; onDone: () => void }) {
-  const [amount, setAmount] = useState('');
-  const [eta, setEta] = useState('');
-  const [message, setMessage] = useState('');
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-
-  if (existing) {
-    return (
-      <Card>
-        <Text style={{ fontWeight: '600' }}>Your quote: {formatMoney(existing.amount_minor, existing.currency)}</Text>
-        <Muted>Status: {existing.status}</Muted>
-      </Card>
-    );
-  }
-  const submit = async () => {
-    setBusy(true);
-    setError(null);
-    try {
-      await api(`/jobs/${jobId}/quotes`, {
-        body: { amountMinor: toMinor(Number(amount), currency), etaMinutes: eta ? Number(eta) : undefined, message: message.trim() || undefined },
-      });
-      onDone();
-    } catch (e) {
-      setError(e);
-    } finally {
-      setBusy(false);
-    }
-  };
-  return (
-    <Card>
-      <Text style={{ fontWeight: '600' }}>Send a quote</Text>
-      <Field label={`Price (${currency})`} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" />
-      <Field label="Can arrive in (minutes)" value={eta} onChangeText={setEta} keyboardType="number-pad" />
-      <Field label="Message" value={message} onChangeText={setMessage} multiline />
-      <Button title="Send quote" loading={busy} disabled={!(Number(amount) > 0)} onPress={submit} />
-      <ErrorText error={error} />
-    </Card>
-  );
-}
-
-function ReviewForm({ jobId }: { jobId: string }) {
-  const [rating, setRating] = useState(0);
-  const [comment, setComment] = useState('');
-  const [done, setDone] = useState(false);
-  const [error, setError] = useState<unknown>(null);
-  if (done) return <Muted>Thanks for your review!</Muted>;
-  return (
-    <Card>
-      <Text style={{ fontWeight: '600' }}>Rate your technician</Text>
-      <View style={styles.row}>
-        {[1, 2, 3, 4, 5].map((n) => (
-          <Chip key={n} label={'★'.repeat(n)} selected={rating === n} onPress={() => setRating(n)} />
-        ))}
-      </View>
-      <Field label="Comment" value={comment} onChangeText={setComment} multiline />
-      <Button
-        title="Submit review"
-        disabled={!rating}
-        onPress={async () => {
-          try {
-            await api(`/jobs/${jobId}/review`, { body: { rating, comment: comment.trim() || undefined } });
-            setDone(true);
-          } catch (e) {
-            setError(e);
-          }
-        }}
-      />
-      <ErrorText error={error} />
-    </Card>
   );
 }
