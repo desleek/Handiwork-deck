@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { one, query } from '../db/pool';
 import { conflict } from '../lib/errors';
+import { pendingReviewJobs } from '../services/reviews';
 import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 
@@ -71,9 +72,7 @@ usersRouter.post('/me/push-tokens', authenticate, requireUser(), async (req, res
   res.status(204).end();
 });
 
-usersRouter.get('/categories', async (_req, res) => {
-  const categories = await query(
-    'SELECT id, slug, name, segment, parent_id, icon FROM service_categories WHERE is_active ORDER BY segment, sort_order, name',
-  );
-  res.json({ categories });
+/** Completed jobs awaiting the customer's mandatory review (new bookings are blocked until done). */
+usersRouter.get('/me/pending-reviews', authenticate, requireUser('customer'), async (req, res) => {
+  res.json({ jobs: await pendingReviewJobs(currentUser(req).id) });
 });

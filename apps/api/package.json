@@ -10,7 +10,6 @@
     "start": "node dist/server.js",
     "worker": "node dist/worker.js",
     "db:migrate": "tsx src/db/migrate.ts",
-    "db:seed": "tsx src/db/seed.ts",
     "db:make-admin": "tsx src/db/make-admin.ts",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"

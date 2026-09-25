@@ -1,4 +1,6 @@
+import { maskContactInfo } from '@handiwork/shared';
 import { one, query } from '../../db/pool';
+import { isApproved } from './conversations';
 import { logger } from '../../lib/logger';
 import { type InboundWhatsAppMessage, parseJobRef, whatsapp } from './whatsapp';
 
@@ -11,6 +13,8 @@ export type RelayOutcome =
 
 interface ConversationRow {
   id: string;
+  job_status: string;
+  job_technician_id: string | null;
   job_ref: string;
   job_title: string;
   customer_id: string;
@@ -44,7 +48,7 @@ export async function relayInbound(msg: InboundWhatsAppMessage): Promise<RelayOu
 
   const { ref, body } = parseJobRef(msg.text);
   const conversations = await query<ConversationRow>(
-    `SELECT c.id, j.ref AS job_ref, j.title AS job_title, c.customer_id, c.technician_id,
+    `SELECT c.id, j.status AS job_status, j.technician_id AS job_technician_id, j.ref AS job_ref, j.title AS job_title, c.customer_id, c.technician_id,
             cu.full_name AS customer_name, te.full_name AS technician_name,
             cu.phone_e164 AS customer_phone, te.phone_e164 AS technician_phone
        FROM conversations c
@@ -56,6 +60,24 @@ export async function relayInbound(msg: InboundWhatsAppMessage): Promise<RelayOu
       ORDER BY c.last_message_at DESC`,
     [sender.id, ref ?? null],
   );
+  // A customer can have several threads on one job (one per technician who quoted).
+  // Over WhatsApp we route to the hired technician; otherwise they must use the app.
+  const byJob = new Map<string, ConversationRow[]>();
+  for (const c of conversations) byJob.set(c.job_ref, [...(byJob.get(c.job_ref) ?? []), c]);
+  for (const [jobRef, list] of byJob) {
+    if (list.length > 1) {
+      const hired = list.filter((c) => c.job_technician_id === c.technician_id);
+      byJob.set(jobRef, hired.length ? hired : list.slice(0, 0));
+      if (!hired.length && ref === jobRef) {
+        await whatsapp().sendText(
+          msg.fromE164,
+          `Several technicians are quoting on #${jobRef}. Please reply to them in the HANDIWORK-DECK app until you approve a quote.`,
+        );
+        return { status: 'ambiguous', refs: [jobRef] };
+      }
+    }
+  }
+  conversations.splice(0, conversations.length, ...[...byJob.values()].flat());
 
   if (conversations.length === 0) {
     await whatsapp().sendText(
@@ -76,11 +98,15 @@ export async function relayInbound(msg: InboundWhatsAppMessage): Promise<RelayOu
   }
 
   const convo = conversations[0]!;
+  // No real contact details are exchanged before the customer approves this technician.
+  const { text: safeBody, masked } = isApproved({ status: convo.job_status, technician_id: convo.job_technician_id }, convo.technician_id)
+    ? { text: body, masked: false }
+    : maskContactInfo(body);
   // Idempotent on the WhatsApp message id: Meta retries webhooks.
   const inserted = await one<{ id: number }>(
-    `INSERT INTO messages (conversation_id, sender_id, body, wa_inbound_id)
-     VALUES ($1, $2, $3, $4) ON CONFLICT (wa_inbound_id) DO NOTHING RETURNING id`,
-    [convo.id, sender.id, body, msg.waMessageId],
+    `INSERT INTO messages (conversation_id, sender_id, body, wa_inbound_id, channel, masked)
+     VALUES ($1, $2, $3, $4, 'whatsapp', $5) ON CONFLICT (wa_inbound_id) DO NOTHING RETURNING id`,
+    [convo.id, sender.id, safeBody, msg.waMessageId, masked],
   );
   if (!inserted) return { status: 'duplicate' };
 
@@ -94,7 +120,7 @@ export async function relayInbound(msg: InboundWhatsAppMessage): Promise<RelayOu
     logger.warn({ conversationId: convo.id, toUserId }, 'relay recipient has no phone number; stored only');
     return { status: 'relayed', conversationId: convo.id, toUserId };
   }
-  const sent = await whatsapp().sendText(toPhone, `[#${convo.job_ref}] ${label}: ${body}`);
+  const sent = await whatsapp().sendText(toPhone, `[#${convo.job_ref}] ${label}: ${safeBody}`);
   if (sent.messageId) {
     await query('UPDATE messages SET wa_outbound_id = $1 WHERE id = $2', [sent.messageId, inserted.id]);
   }

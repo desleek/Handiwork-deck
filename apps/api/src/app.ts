@@ -5,6 +5,11 @@ import { pinoHttp } from 'pino-http';
 import { logger } from './lib/logger';
 import { errorHandler, notFoundHandler } from './middleware/errors';
 import { adminRouter } from './routes/admin';
+import { adminTaxonomyRouter } from './routes/adminTaxonomy';
+import { categoriesRouter } from './routes/categories';
+import { chatRouter } from './routes/chat';
+import { discoverRouter } from './routes/discover';
+import { quotesRouter } from './routes/quotes';
 import { adsRouter } from './routes/ads';
 import { healthRouter } from './routes/health';
 import { jobsRouter } from './routes/jobs';
@@ -27,7 +32,21 @@ export function createApp() {
   app.use('/v1', paymentWebhookRouter, whatsappWebhookRouter);
 
   app.use(express.json({ limit: '1mb' }));
-  app.use('/v1', usersRouter, techniciansRouter, jobsRouter, paymentsRouter, uploadsRouter, adsRouter, adminRouter);
+  app.use(
+    '/v1',
+    usersRouter,
+    categoriesRouter,
+    discoverRouter,
+    techniciansRouter,
+    jobsRouter,
+    quotesRouter,
+    chatRouter,
+    paymentsRouter,
+    uploadsRouter,
+    adsRouter,
+    adminRouter,
+    adminTaxonomyRouter,
+  );
 
   app.use(notFoundHandler);
   app.use(errorHandler);

@@ -1,4 +1,4 @@
-import type { MinorUnits } from '@handiwork/shared';
+import type { MinorUnits, PaymentMethod } from '@handiwork/shared';
 
 export type ProviderName = 'stripe' | 'paystack' | 'flutterwave' | 'mock';
 
@@ -23,9 +23,13 @@ export interface SplitPaymentInput {
   /** Our payment id; used as the idempotency key / provider reference. */
   reference: string;
   amount: MinorUnits;
+  /** Ignored when there is no payee (platform collects the full amount). */
   platformFee: MinorUnits;
   currency: string;
-  payeeAccountRef: string;
+  /** Payee account to split to at source. Omit to collect everything on the platform account. */
+  payeeAccountRef?: string;
+  /** Methods to offer on the hosted checkout (card / bank_transfer / ussd). */
+  methods: Exclude<PaymentMethod, 'wallet'>[];
   customer: { email?: string; name: string; phone?: string };
   description: string;
   callbackUrl?: string;

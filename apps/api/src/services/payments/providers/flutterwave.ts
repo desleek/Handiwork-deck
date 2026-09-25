@@ -9,6 +9,8 @@ import {
 
 const BASE_URL = 'https://api.flutterwave.com/v3';
 
+const FLW_OPTION = { card: 'card', bank_transfer: 'banktransfer', ussd: 'ussd' } as const;
+
 /**
  * Flutterwave Split Payments via subaccounts. Flutterwave's API takes amounts in
  * major units, so we convert at this boundary. `flat_subaccount` sends exactly
@@ -58,13 +60,18 @@ export class FlutterwaveProvider implements PaymentProvider {
       redirect_url: input.callbackUrl,
       customer: { email: input.customer.email, name: input.customer.name, phonenumber: input.customer.phone },
       customizations: { title: 'HANDIWORK-DECK', description: input.description },
-      subaccounts: [
-        {
-          id: input.payeeAccountRef,
-          transaction_charge_type: 'flat_subaccount',
-          transaction_charge: toMajor(payeeShare, input.currency),
-        },
-      ],
+      payment_options: input.methods.map((m) => FLW_OPTION[m]).join(','),
+      ...(input.payeeAccountRef
+        ? {
+            subaccounts: [
+              {
+                id: input.payeeAccountRef,
+                transaction_charge_type: 'flat_subaccount',
+                transaction_charge: toMajor(payeeShare, input.currency),
+              },
+            ],
+          }
+        : {}),
       meta: input.metadata,
     });
     // Flutterwave's transaction id only exists after payment; tx_ref is our stable key.

@@ -1,8 +1,9 @@
 import { VERIFICATION_STATUSES } from '@handiwork/shared';
 import { Router } from 'express';
 import { z } from 'zod';
-import { one, query } from '../db/pool';
+import { one, query, tx } from '../db/pool';
 import { conflict, notFound } from '../lib/errors';
+import { postToWallet } from '../services/wallet';
 import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 import { jobs } from '../queues/index';
@@ -93,6 +94,12 @@ adminRouter.post('/admin/ads/:id/review', async (req, res) => {
   res.json({ ad });
 });
 
+/**
+ * Refunds a captured payment.
+ *  - wallet settlement: reversed internally (technician's share and our fee back to the customer's wallet).
+ *  - platform_collect: the technician's wallet credit is clawed back first, then the gateway refunds.
+ *  - split: the gateway reverses the split (Stripe reverse_transfer / provider refund).
+ */
 adminRouter.post('/admin/payments/:id/refund', async (req, res) => {
   const id = parse(z.uuid(), req.params.id);
   const { amountMinor } = parse(z.object({ amountMinor: z.number().int().positive().optional() }), req.body);
@@ -100,7 +107,29 @@ adminRouter.post('/admin/payments/:id/refund', async (req, res) => {
   if (!payment) throw notFound('Payment');
   if (!['succeeded', 'partially_refunded'].includes(payment.status)) throw conflict('Only captured payments can be refunded');
   const refundable = Number(payment.amount_minor) - Number(payment.refunded_minor);
-  if (amountMinor && amountMinor > refundable) throw conflict(`At most ${refundable} can be refunded`);
+  const amount = amountMinor ?? refundable;
+  if (amount > refundable) throw conflict(`At most ${refundable} can be refunded`);
+  const gross = Number(payment.amount_minor);
+  const payeeShare = Math.round(((gross - Number(payment.platform_fee_minor)) * amount) / gross);
+  const refundKey = `${payment.id}:${Number(payment.refunded_minor) + amount}`;
+
+  if (payment.purpose === 'job' && payment.settlement !== 'split') {
+    await tx(async (db) => {
+      // Ledger idempotency keys on payment_id, so refund entries (which can repeat for partial refunds) carry a memo instead.
+      if (payeeShare > 0) {
+        await postToWallet(db, { userId: payment.payee_id, currency: payment.currency, amountMinor: -payeeShare, kind: 'refund', jobId: payment.job_id, memo: `Refund ${refundKey}` });
+      }
+      if (payment.settlement === 'wallet') {
+        await postToWallet(db, { userId: payment.payer_id, currency: payment.currency, amountMinor: amount, kind: 'refund', jobId: payment.job_id, memo: `Refund ${refundKey}` });
+        const refunded = Number(payment.refunded_minor) + amount;
+        await db.query('UPDATE payments SET refunded_minor = $2, status = $3 WHERE id = $1', [id, refunded, refunded >= gross ? 'refunded' : 'partially_refunded']);
+      }
+    });
+    if (payment.settlement === 'wallet') {
+      res.status(200).json({ refundRef: `wallet:${refundKey}`, status: 'refunded_to_wallet' });
+      return;
+    }
+  }
   // The provider's refund webhook updates refunded_minor / status.
   const result = await getProvider(payment.provider as ProviderName).refund({
     providerRef: payment.provider_ref,

@@ -35,13 +35,25 @@ describe('Paystack provider', () => {
       platformFee: 10_000,
       currency: 'NGN',
       payeeAccountRef: 'ACCT_123',
+      methods: ['card', 'ussd'],
       customer: { email: 'a@b.co', name: 'Ada' },
       description: 'job',
       metadata: {},
     });
     expect(res.checkoutUrl).toBe('https://checkout.paystack.com/x');
     const sent = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
-    expect(sent).toMatchObject({ amount: 100_000, subaccount: 'ACCT_123', transaction_charge: 10_000, bearer: 'subaccount' });
+    expect(sent).toMatchObject({ amount: 100_000, subaccount: 'ACCT_123', transaction_charge: 10_000, bearer: 'subaccount', channels: ['card', 'ussd'] });
+  });
+});
+
+describe('platform-collected payments', () => {
+  it('omits the split when there is no payee account', async () => {
+    const fetchMock = vi.fn(async () => jsonResponse({ status: true, message: 'ok', data: { authorization_url: 'u', reference: 'r' } }));
+    const p = new PaystackProvider('sk', fetchMock as unknown as typeof fetch);
+    await p.createSplitPayment({ reference: 'r', amount: 5000, platformFee: 0, currency: 'NGN', methods: ['bank_transfer'], customer: { email: 'a@b.co', name: 'A' }, description: 'topup', metadata: {} });
+    const sent = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
+    expect(sent).not.toHaveProperty('subaccount');
+    expect(sent.channels).toEqual(['bank_transfer']);
   });
 });
 
@@ -55,12 +67,14 @@ describe('Flutterwave provider', () => {
       platformFee: 25_000,
       currency: 'KES',
       payeeAccountRef: 'RS_1',
+      methods: ['card', 'bank_transfer'],
       customer: { email: 'a@b.co', name: 'Ada' },
       description: 'job',
       metadata: {},
     });
     const sent = JSON.parse((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body as string);
     expect(sent.amount).toBe(2500);
+    expect(sent.payment_options).toBe('card,banktransfer');
     expect(sent.subaccounts[0]).toEqual({ id: 'RS_1', transaction_charge_type: 'flat_subaccount', transaction_charge: 2250 });
   });
 

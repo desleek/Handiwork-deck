@@ -23,8 +23,10 @@ const T = (to: JobStatus, ...by: Transition['by']): Transition => ({ to, by });
 
 /** The job lifecycle. Anything not listed here is an illegal transition. */
 export const JOB_TRANSITIONS: Record<JobStatus, readonly Transition[]> = {
-  open: [T('quoted', 'system'), T('cancelled', 'customer', 'admin')],
-  quoted: [T('assigned', 'customer'), T('cancelled', 'customer', 'admin')],
+  // open -> assigned directly is instant booking (system books the technician at their listed rate).
+  open: [T('quoted', 'system'), T('assigned', 'system'), T('cancelled', 'customer', 'admin')],
+  // quoted -> assigned by 'system' happens when a technician accepts the customer's counter-offer.
+  quoted: [T('assigned', 'customer', 'system'), T('cancelled', 'customer', 'admin')],
   assigned: [
     T('en_route', 'technician'),
     T('cancelled', 'customer', 'technician', 'admin'),
@@ -44,5 +46,12 @@ export function canTransition(from: JobStatus, to: JobStatus, actor: UserRole | 
 
 export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = ['assigned', 'en_route', 'in_progress'];
 
-export const QUOTE_STATUSES = ['pending', 'accepted', 'rejected', 'withdrawn'] as const;
+export const QUOTE_STATUSES = ['pending', 'countered', 'accepted', 'rejected', 'withdrawn'] as const;
 export type QuoteStatus = (typeof QUOTE_STATUSES)[number];
+
+/** How the customer engaged: open marketplace post, a request to one technician, or instant book. */
+export const BOOKING_MODES = ['open', 'request', 'instant'] as const;
+export type BookingMode = (typeof BOOKING_MODES)[number];
+
+/** Jobs in these states count as "completed" for the mandatory-review rule. */
+export const REVIEWABLE_JOB_STATUSES: readonly JobStatus[] = ['completed', 'paid'];

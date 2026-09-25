@@ -7,7 +7,7 @@ import { InMemoryScheduler, jobs } from '../src/queues/index';
 import { relayInbound } from '../src/services/messaging/relay';
 import { LoggingWhatsAppClient, setWhatsAppClient } from '../src/services/messaging/whatsapp';
 import { MockProvider } from '../src/services/payments/providers/mock';
-import { bearer, dbAvailable, resetDb } from './helpers';
+import { bearer, dbAvailable, fullScores, laborQuote, resetDb } from './helpers';
 
 const hasDb = await dbAvailable();
 if (!hasDb) console.warn('Skipping integration tests: PostgreSQL not reachable (set TEST_DATABASE_URL)');
@@ -113,9 +113,9 @@ describe.skipIf(!hasDb)('marketplace flow', () => {
   });
 
   it('takes quotes and lets the customer accept one', async () => {
-    const q1 = await request(app).post(`/v1/jobs/${ids.job}/quotes`).set('Authorization', bearer(TECH.uid)).send({ amountMinor: 1_500_000, etaMinutes: 45 });
+    const q1 = await request(app).post(`/v1/jobs/${ids.job}/quotes`).set('Authorization', bearer(TECH.uid)).send(laborQuote(1_500_000, { etaMinutes: 45 }));
     expect(q1.status).toBe(201);
-    const q2 = await request(app).post(`/v1/jobs/${ids.job}/quotes`).set('Authorization', bearer(TECH_FAR.uid)).send({ amountMinor: 2_000_000 });
+    const q2 = await request(app).post(`/v1/jobs/${ids.job}/quotes`).set('Authorization', bearer(TECH_FAR.uid)).send(laborQuote(2_000_000));
     expect(q2.status).toBe(201);
 
     // Escalations become no-ops once quotes arrive.
@@ -169,16 +169,12 @@ describe.skipIf(!hasDb)('marketplace flow', () => {
   });
 
   it('takes a split payment and marks the job paid from the provider webhook', async () => {
-    const noPayee = await request(app).post(`/v1/jobs/${ids.job}/payments`).set('Authorization', bearer(CUSTOMER.uid));
-    expect(noPayee.status).toBe(409);
-    expect(noPayee.body.error.code).toBe('payee_not_onboarded');
-
     const onboard = await request(app).post('/v1/technicians/me/payout-account').set('Authorization', bearer(TECH.uid)).send({ currency: 'NGN', country: 'NG' });
     expect(onboard.status).toBe(201);
 
     const pay = await request(app).post(`/v1/jobs/${ids.job}/payments`).set('Authorization', bearer(CUSTOMER.uid));
     expect(pay.status).toBe(201);
-    expect(pay.body).toMatchObject({ provider: 'mock', amountMinor: 1_500_000, platformFeeMinor: 150_000, currency: 'NGN' });
+    expect(pay.body).toMatchObject({ provider: 'mock', settlement: 'split', amountMinor: 1_500_000, platformFeeMinor: 150_000, currency: 'NGN' });
 
     const body = JSON.stringify({ id: 'evt_1', type: 'payment.succeeded', reference: pay.body.paymentId, amount: 1_500_000 });
     const bad = await request(app).post('/v1/webhooks/payments/mock').set('x-mock-signature', 'forged').set('Content-Type', 'application/json').send(body);
@@ -196,10 +192,11 @@ describe.skipIf(!hasDb)('marketplace flow', () => {
   });
 
   it('records a review and updates the technician rating', async () => {
-    const r = await request(app).post(`/v1/jobs/${ids.job}/review`).set('Authorization', bearer(CUSTOMER.uid)).send({ rating: 5, comment: 'Fast and tidy' });
+    const r = await request(app).post(`/v1/jobs/${ids.job}/review`).set('Authorization', bearer(CUSTOMER.uid)).send({ scores: fullScores(5), comment: 'Fast and tidy work' });
     expect(r.status).toBe(201);
     const profile = await request(app).get(`/v1/technicians/${ids.tech}`).set('Authorization', bearer(CUSTOMER.uid));
     expect(profile.body.technician).toMatchObject({ rating_avg: 5, rating_count: 1 });
+    expect(profile.body.technician.reviews[0].tags).toContain('Punctuality 5★');
     expect(profile.body.technician).not.toHaveProperty('phone_e164');
   });
 

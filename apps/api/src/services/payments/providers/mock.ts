@@ -12,7 +12,7 @@ export class MockProvider implements PaymentProvider {
   }
 
   async createSplitPayment(input: Parameters<PaymentProvider['createSplitPayment']>[0]) {
-    return { providerRef: input.reference, checkoutUrl: `https://mock.pay/checkout/${input.reference}` };
+    return { providerRef: input.reference, checkoutUrl: `https://mock.pay/checkout/${input.reference}?methods=${input.methods.join(',')}` };
   }
 
   /** Sign a payload the same way `parseWebhook` expects, for tests and local tooling. */

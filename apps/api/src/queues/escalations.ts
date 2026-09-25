@@ -6,6 +6,9 @@ import { type EscalationJobData, jobs, minutes } from './index';
 
 interface JobRow {
   id: string;
+  booking_mode: string;
+  target_technician_id: string | null;
+  awaiting_category_review: boolean;
   ref: string;
   title: string;
   status: string;
@@ -40,13 +43,38 @@ async function notifyAdmins(title: string, body: string, data: Record<string, st
  *  - no_quote_admin: still no quotes after M min → alert ops/admins and reassure the customer
  *  - no_show: assigned but technician not en route by scheduled time + K min → alert admins & customer
  */
-export async function processEscalation({ kind, jobId }: EscalationJobData): Promise<string> {
+export async function processEscalation({ kind, jobId, round = 1 }: EscalationJobData): Promise<string> {
   const job = await loadJob(jobId);
   if (!job) return 'job_missing';
 
   switch (kind) {
     case 'no_quote_widen': {
       if (job.status !== 'open' || job.quote_count > 0) return 'skipped';
+      if (job.awaiting_category_review) {
+        // Still waiting on an admin to approve the custom service; check again later.
+        await jobs().scheduleEscalation({ kind: 'no_quote_admin', jobId, round }, minutes(Math.max(env.ESCALATE_NO_QUOTE_ADMIN_AFTER_MIN - env.ESCALATE_NO_QUOTE_WIDEN_AFTER_MIN, 1)));
+        return 'awaiting_review';
+      }
+      if (job.booking_mode === 'request' && job.target_technician_id) {
+        // The requested technician didn't respond: open the job to the marketplace instead.
+        await tx(async (db) => {
+          await db.query(`UPDATE jobs SET booking_mode = 'open', target_technician_id = NULL, escalation_level = GREATEST(escalation_level, 1) WHERE id = $1`, [jobId]);
+          await db.query(`INSERT INTO escalations (job_id, kind, level) VALUES ($1, 'request_unanswered', 1)`, [jobId]);
+        });
+        const matches = await findMatchingTechnicians(job, Number(job.match_radius_km));
+        await Promise.all(
+          matches
+            .filter((t) => t.user_id !== job.target_technician_id)
+            .map((t) => jobs().notify(t.user_id, { title: 'New job near you', body: job.title, data: { jobId, type: 'job.new' } })),
+        );
+        await jobs().notify(job.customer_id, {
+          title: 'Opened to more technicians',
+          body: `Your requested technician hasn't responded, so we've shared #${job.ref} with other nearby technicians.`,
+          data: { jobId, type: 'job.escalated' },
+        });
+        await jobs().scheduleEscalation({ kind: 'no_quote_widen', jobId, round: round + 1 }, minutes(env.ESCALATE_NO_QUOTE_WIDEN_AFTER_MIN));
+        return 'opened_to_marketplace';
+      }
       const oldRadius = Number(job.match_radius_km);
       const newRadius = oldRadius * env.MATCH_WIDEN_RADIUS_FACTOR;
       const before = new Set((await findMatchingTechnicians(job, oldRadius)).map((t) => t.user_id));
@@ -69,7 +97,7 @@ export async function processEscalation({ kind, jobId }: EscalationJobData): Pro
         ),
       );
       const remaining = env.ESCALATE_NO_QUOTE_ADMIN_AFTER_MIN - env.ESCALATE_NO_QUOTE_WIDEN_AFTER_MIN;
-      await jobs().scheduleEscalation({ kind: 'no_quote_admin', jobId }, minutes(Math.max(remaining, 1)));
+      await jobs().scheduleEscalation({ kind: 'no_quote_admin', jobId, round }, minutes(Math.max(remaining, 1)));
       logger.info({ jobId, newRadius, notified: fresh.length }, 'escalation: widened search radius');
       return 'widened';
     }

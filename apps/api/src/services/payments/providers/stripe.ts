@@ -49,6 +49,7 @@ export class StripeProvider implements PaymentProvider {
    * metadata, which is what the webhook matches on.
    */
   async createSplitPayment(input: Parameters<PaymentProvider['createSplitPayment']>[0]) {
+    if (!input.methods.includes('card')) throw new Error('Stripe checkout supports card payments only');
     const returnUrl = input.callbackUrl ?? 'https://handiwork-deck.app/payments/return';
     const session = await this.stripe.checkout.sessions.create(
       {
@@ -64,9 +65,11 @@ export class StripeProvider implements PaymentProvider {
             },
           },
         ],
+        payment_method_types: ['card'],
         payment_intent_data: {
-          application_fee_amount: input.platformFee,
-          transfer_data: { destination: input.payeeAccountRef },
+          ...(input.payeeAccountRef
+            ? { application_fee_amount: input.platformFee, transfer_data: { destination: input.payeeAccountRef } }
+            : {}),
           metadata: { ...input.metadata, reference: input.reference },
         },
         metadata: { ...input.metadata, reference: input.reference },

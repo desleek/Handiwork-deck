@@ -54,9 +54,10 @@ export class PaystackProvider implements PaymentProvider {
       amount: input.amount,
       currency: input.currency,
       reference: input.reference,
-      subaccount: input.payeeAccountRef,
-      transaction_charge: input.platformFee,
-      bearer: 'subaccount',
+      channels: input.methods,
+      ...(input.payeeAccountRef
+        ? { subaccount: input.payeeAccountRef, transaction_charge: input.platformFee, bearer: 'subaccount' }
+        : {}),
       callback_url: input.callbackUrl,
       metadata: input.metadata,
     });

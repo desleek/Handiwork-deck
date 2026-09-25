@@ -9,6 +9,8 @@ export type EscalationKind = 'no_quote_widen' | 'no_quote_admin' | 'no_show';
 export interface EscalationJobData {
   kind: EscalationKind;
   jobId: string;
+  /** Distinguishes deliberate re-schedules of the same escalation (BullMQ dedupes on job id). */
+  round?: number;
 }
 export interface NotificationJobData {
   userId: string;
@@ -37,7 +39,7 @@ class BullScheduler implements JobScheduler {
     // Deterministic id: re-scheduling the same escalation for a job is a no-op.
     await this.escalations.add(data.kind, data, {
       delay: delayMs,
-      jobId: `${data.kind}:${data.jobId}`,
+      jobId: `${data.kind}:${data.jobId}:${data.round ?? 1}`,
       attempts: 5,
       backoff: { type: 'exponential', delay: 10_000 },
       removeOnComplete: 1000,
