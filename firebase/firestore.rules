@@ -1,0 +1,36 @@
+rules_version = '2';
+
+// Live technician location. The API (Admin SDK, bypasses rules) maintains
+// liveJobs/{jobId} = { customerUid, technicianUid, active }. Devices only ever
+// touch liveJobs/{jobId}/positions/latest.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function liveJob(jobId) {
+      return get(/databases/$(database)/documents/liveJobs/$(jobId)).data;
+    }
+    function isParty(job) {
+      return request.auth != null && (request.auth.uid == job.customerUid || request.auth.uid == job.technicianUid);
+    }
+
+    match /liveJobs/{jobId} {
+      allow read: if isParty(resource.data);
+      allow write: if false;
+
+      match /positions/{docId} {
+        // Location is only visible while the technician is en route / on the job.
+        allow read: if isParty(liveJob(jobId)) && liveJob(jobId).active == true;
+        allow write: if request.auth != null
+          && docId == 'latest'
+          && request.auth.uid == liveJob(jobId).technicianUid
+          && liveJob(jobId).active == true
+          && request.resource.data.keys().hasOnly(['lat', 'lng', 'heading', 'at'])
+          && request.resource.data.lat is number && request.resource.data.lat >= -90 && request.resource.data.lat <= 90
+          && request.resource.data.lng is number && request.resource.data.lng >= -180 && request.resource.data.lng <= 180;
+      }
+    }
+
+    match /{document=**} {
+      allow read, write: if false;
+    }
+  }
+}

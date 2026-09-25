@@ -1,0 +1,36 @@
+{
+  "expo": {
+    "name": "HANDIWORK-DECK",
+    "slug": "handiwork-deck",
+    "scheme": "handiworkdeck",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "bundleIdentifier": "com.handiworkdeck.app",
+      "supportsTablet": false,
+      "infoPlist": {
+        "NSLocationWhenInUseUsageDescription": "Your location is used to find technicians near you and to show your technician's live position.",
+        "NSLocationAlwaysAndWhenInUseUsageDescription": "While you are en route to a job, your location is shared live with the customer.",
+        "NSCameraUsageDescription": "Take photos of the job, receipts and your portfolio.",
+        "NSPhotoLibraryUsageDescription": "Attach photos of the job, receipts and your portfolio."
+      }
+    },
+    "android": {
+      "package": "com.handiworkdeck.app",
+      "permissions": ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION", "CAMERA", "POST_NOTIFICATIONS"]
+    },
+    "plugins": [
+      "expo-router",
+      "expo-status-bar",
+      "expo-web-browser",
+      "expo-secure-store",
+      ["expo-location", { "isAndroidForegroundServiceEnabled": true }],
+      "expo-notifications",
+      "expo-image-picker"
+    ],
+    "experiments": {
+      "typedRoutes": false
+    }
+  }
+}

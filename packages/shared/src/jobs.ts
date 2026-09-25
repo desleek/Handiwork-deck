@@ -1,0 +1,48 @@
+import type { UserRole } from './roles';
+
+export const JOB_STATUSES = [
+  'open', // posted, visible to matching technicians
+  'quoted', // at least one quote received
+  'assigned', // customer accepted a quote
+  'en_route', // technician travelling (live location shared)
+  'in_progress',
+  'completed', // technician marked work done, awaiting payment
+  'paid', // payment captured and split
+  'cancelled',
+  'disputed',
+] as const;
+export type JobStatus = (typeof JOB_STATUSES)[number];
+
+interface Transition {
+  to: JobStatus;
+  /** Roles allowed to trigger this transition directly via the API. */
+  by: readonly (UserRole | 'system')[];
+}
+
+const T = (to: JobStatus, ...by: Transition['by']): Transition => ({ to, by });
+
+/** The job lifecycle. Anything not listed here is an illegal transition. */
+export const JOB_TRANSITIONS: Record<JobStatus, readonly Transition[]> = {
+  open: [T('quoted', 'system'), T('cancelled', 'customer', 'admin')],
+  quoted: [T('assigned', 'customer'), T('cancelled', 'customer', 'admin')],
+  assigned: [
+    T('en_route', 'technician'),
+    T('cancelled', 'customer', 'technician', 'admin'),
+    T('disputed', 'customer', 'technician'),
+  ],
+  en_route: [T('in_progress', 'technician'), T('disputed', 'customer', 'technician')],
+  in_progress: [T('completed', 'technician'), T('disputed', 'customer', 'technician')],
+  completed: [T('paid', 'system'), T('disputed', 'customer')],
+  paid: [T('disputed', 'customer', 'admin')],
+  cancelled: [],
+  disputed: [T('in_progress', 'admin'), T('completed', 'admin'), T('cancelled', 'admin'), T('paid', 'admin')],
+};
+
+export function canTransition(from: JobStatus, to: JobStatus, actor: UserRole | 'system'): boolean {
+  return JOB_TRANSITIONS[from].some((t) => t.to === to && t.by.includes(actor));
+}
+
+export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = ['assigned', 'en_route', 'in_progress'];
+
+export const QUOTE_STATUSES = ['pending', 'accepted', 'rejected', 'withdrawn'] as const;
+export type QuoteStatus = (typeof QUOTE_STATUSES)[number];

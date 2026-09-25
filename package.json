@@ -1,0 +1,21 @@
+{
+  "name": "handiwork-deck",
+  "private": true,
+  "description": "Multi-sided marketplace connecting homeowners, offices and SMEs with local technicians and tradespeople.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run dev --workspace @handiwork/api",
+    "dev:worker": "npm run worker:dev --workspace @handiwork/api",
+    "dev:mobile": "npm run start --workspace @handiwork/mobile",
+    "db:migrate": "npm run db:migrate --workspace @handiwork/api",
+    "db:seed": "npm run db:seed --workspace @handiwork/api",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20.19"
+  }
+}
