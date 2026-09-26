@@ -1,9 +1,11 @@
 import { toMinor } from '@handiwork/shared';
 import { router } from 'expo-router';
+import * as WebBrowser from 'expo-web-browser';
 import { useState } from 'react';
 import { Text, View } from 'react-native';
 import { Badge, Button, Card, Chip, colors, ErrorText, Field, Loading, Muted, Screen, styles } from '@/components/ui';
 import { api } from '@/lib/api';
+import { API_URL } from '@/lib/config';
 import { formatMoney } from '@/lib/format';
 import { useApi } from '@/lib/useApi';
 
@@ -19,7 +21,7 @@ interface Dashboard {
     markup_minor: number;
     net_this_month_minor: number;
   }[];
-  pending: { currency: string; jobs: number; amount_minor: number }[];
+  pending: { currency: string; jobs: number; amount_minor: number; in_escrow_minor: number }[];
   wallet: { currency: string; balance_minor: number }[];
   payouts: { id: string; currency: string; amount_minor: number; fee_minor: number; net_minor: number; speed: string; status: string; scheduled_for: string; failure_reason: string | null }[];
   promotions: { boosts: { id: string; category_name: string | null; ends_at: string }[]; alerts: { id: string; radius_factor: number; ends_at: string }[] };
@@ -44,6 +46,7 @@ interface Promotions {
   eligibility: { eligible: boolean; reasons: string[] };
 }
 
+const PROMO_METHOD_LABEL = { wallet: 'Wallet', card: 'Card', bank_transfer: 'Bank transfer', ussd: 'USSD' } as const;
 const signed = (bps: number) => `${bps > 0 ? '+' : ''}${bps / 100}%`;
 
 /** Section 4 earnings dashboard. */
@@ -55,6 +58,7 @@ export default function Earnings() {
   const [speed, setSpeed] = useState<'standard' | 'instant'>('standard');
   const [quote, setQuote] = useState<{ feeMinor: number; netMinor: number; scheduledFor: string } | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
+  const [promoMethod, setPromoMethod] = useState<'wallet' | 'card' | 'bank_transfer' | 'ussd'>('wallet');
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<unknown>(null);
 
@@ -142,6 +146,7 @@ export default function Earnings() {
       {data.pending.map((x) => (
         <Muted key={x.currency}>
           In progress: {x.jobs} job(s) worth {formatMoney(x.amount_minor, x.currency)}
+          {Number(x.in_escrow_minor) > 0 ? ` · ${formatMoney(x.in_escrow_minor, x.currency)} secured in escrow` : ''}
         </Muted>
       ))}
 
@@ -200,17 +205,32 @@ export default function Earnings() {
           </Muted>
         ))}
         {promos.data && !promos.data.eligibility.eligible && promos.data.eligibility.reasons.map((r) => <Muted key={r}>⚠ {r}</Muted>)}
+        <Muted>Pay with</Muted>
+        <View style={styles.row}>
+          {(['wallet', 'card', 'bank_transfer', 'ussd'] as const).map((m) => (
+            <Chip key={m} label={PROMO_METHOD_LABEL[m]} selected={promoMethod === m} onPress={() => setPromoMethod(m)} />
+          ))}
+        </View>
         {promos.data?.products.map((prod) => (
           <Button
             key={prod.key}
             title={`${prod.label} — ${formatMoney(prod.priceMinor, currency)}`}
             variant="secondary"
-            disabled={!promos.data?.eligibility.eligible || balance < prod.priceMinor}
+            disabled={!promos.data?.eligibility.eligible || (promoMethod === 'wallet' && balance < prod.priceMinor)}
             loading={busy === prod.key}
-            onPress={() => run(prod.key, async () => void (await api('/technicians/me/promotions', { body: { product: prod.key, currency } })))}
+            onPress={() =>
+              run(prod.key, async () => {
+                // Section 11: promotions go through the same payment layer as jobs.
+                const r = await api<{ checkoutUrl?: string | null }>('/technicians/me/promotions', { body: { product: prod.key, currency, method: promoMethod } });
+                if (r.checkoutUrl) {
+                  await WebBrowser.openAuthSessionAsync(r.checkoutUrl, `${API_URL}/v1/payments/return`);
+                  return 'Your promotion starts as soon as the payment is confirmed.';
+                }
+              })
+            }
           />
         ))}
-        <Muted>Paid from your wallet balance.</Muted>
+        <Muted>A visibility boost ranks your own profile higher and priority alerts widen your job reach — separate from Marketplace ads.</Muted>
       </Card>
       {msg ? <Muted>{msg}</Muted> : null}
       <ErrorText error={err} />

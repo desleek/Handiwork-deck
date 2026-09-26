@@ -18,10 +18,27 @@ interface Option {
 const PROVIDER_LABEL: Record<string, string> = { paystack: 'Paystack', flutterwave: 'Flutterwave', stripe: 'Stripe', mock: 'Test gateway' };
 
 /**
- * Card, virtual account (bank transfer), USSD, or wallet — with a choice of
- * Paystack / Flutterwave where both can take the method.
+ * Section 11: card, bank transfer (virtual account), USSD, or wallet — with a
+ * choice of Paystack / Flutterwave where both can take the method. The same
+ * picker pays jobs into escrow and technician promotions.
  */
-export function PaymentPicker({ jobId, amountMinor, currency, onPaid }: { jobId: string; amountMinor: number; currency: string; onPaid: () => void }) {
+export function PaymentPicker({
+  endpoint,
+  amountMinor,
+  currency,
+  onPaid,
+  title,
+  buttonTitle = 'Pay now',
+  extraBody,
+}: {
+  endpoint: string;
+  amountMinor: number;
+  currency: string;
+  onPaid: () => void;
+  title?: string;
+  buttonTitle?: string;
+  extraBody?: Record<string, unknown>;
+}) {
   const { data } = useApi<{ methods: Option[] }>(`/payments/options?currency=${currency}`);
   const [method, setMethod] = useState<PaymentMethod | null>(null);
   const [provider, setProvider] = useState<string | null>(null);
@@ -34,8 +51,8 @@ export function PaymentPicker({ jobId, amountMinor, currency, onPaid }: { jobId:
     setBusy(true);
     setError(null);
     try {
-      const res = await api<{ checkoutUrl?: string | null; status?: string }>(`/jobs/${jobId}/payments`, {
-        body: { method, provider: provider ?? undefined },
+      const res = await api<{ checkoutUrl?: string | null; status?: string }>(endpoint, {
+        body: { ...extraBody, method, provider: provider ?? undefined },
       });
       if (res.checkoutUrl) await WebBrowser.openAuthSessionAsync(res.checkoutUrl, `${API_URL}/v1/payments/return`);
       onPaid();
@@ -48,7 +65,7 @@ export function PaymentPicker({ jobId, amountMinor, currency, onPaid }: { jobId:
 
   return (
     <Card>
-      <Text style={styles.label}>Pay {formatMoney(amountMinor, currency)}</Text>
+      <Text style={styles.label}>{title ?? `Pay ${formatMoney(amountMinor, currency)}`}</Text>
       <View style={styles.row}>
         {data?.methods.map((m) => (
           <Chip
@@ -75,7 +92,7 @@ export function PaymentPicker({ jobId, amountMinor, currency, onPaid }: { jobId:
       {option?.method === 'bank_transfer' && <Muted>You'll get a one-time account number to transfer to.</Muted>}
       {option?.method === 'ussd' && <Muted>You'll get a USSD code to dial from your bank phone number.</Muted>}
       {walletShort && <Muted>Not enough in your wallet — top up from your profile, or pick another method.</Muted>}
-      <Button title="Pay now" loading={busy} disabled={!method || walletShort} onPress={pay} />
+      <Button title={buttonTitle} loading={busy} disabled={!method || walletShort} onPress={pay} />
       <ErrorText error={error} />
     </Card>
   );

@@ -6,7 +6,6 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { Pressable, ScrollView, Text, View } from 'react-native';
 import MapView, { Callout, Marker } from 'react-native-maps';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { AdSlot } from '@/components/AdSlot';
 import { TechCard } from '@/components/TechCard';
 import { Button, Chip, colors, ErrorText, Loading, Muted, styles } from '@/components/ui';
 import { api } from '@/lib/api';
@@ -167,7 +166,6 @@ export default function Discover() {
               onPress={() => router.push({ pathname: '/post-job', params: { categoryId: String(selected.id), name: selected.name, isOther: selected.is_other ? '1' : '' } })}
             />
           )}
-          <AdSlot categoryId={categoryId ?? undefined} />
         </ScrollView>
       )}
     </SafeAreaView>

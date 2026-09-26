@@ -2,14 +2,14 @@
 
 A multi-sided mobile marketplace connecting **homeowners, offices and SMEs** with local
 **household/office technicians** and **construction / plant-erection tradespeople**, plus
-**spare-parts sellers** who advertise to both sides.
+**spare-parts sellers** who advertise to both sides in a separate Marketplace / Deals tab.
 
 | Role | What they do |
 | --- | --- |
-| Customer | Post jobs (homeowner, office or SME), compare quotes, track the technician live, pay, review |
-| Technician | Get verified, set services and service radius, quote on nearby jobs, share live location, get paid via split payments |
-| Advertiser | Run sponsored spare-parts campaigns targeted by service category |
-| Admin | Manage the service taxonomy, verify technicians, work escalations, review ads, refund payments |
+| Customer | Post jobs (homeowner, office or SME), compare quotes, fund escrow, track the technician live, confirm and release payment, review |
+| Technician | Get verified, set services and service radius, quote on nearby jobs, share live location, get paid when escrow is released |
+| Advertiser | Featured seller cards, brand cards and sponsored search slots — admin-managed at launch, self-serve ready |
+| Admin | Manage the service taxonomy, verify technicians, work escalations, route payment gateways, settle escrow disputes, run the ads module |
 
 ## Repository layout
 
@@ -33,7 +33,8 @@ docker-compose.yml   Local PostgreSQL + Redis
 | Auth | Firebase Auth ID tokens, verified server-side | `apps/api/src/middleware/auth.ts` |
 | Push | Firebase Cloud Messaging | `apps/api/src/services/notifications/push.ts` |
 | Live location | Firestore, device to device, access granted per job by the API | `apps/mobile/src/lib/liveLocation.ts`, `firebase/firestore.rules` |
-| Payments | Provider-agnostic interface: Stripe Connect, Paystack and Flutterwave split payments | `apps/api/src/services/payments` |
+| Payments | Provider-agnostic registry (Paystack, Flutterwave, Stripe, pluggable partners) with admin routing/fallback, escrow | `apps/api/src/services/payments`, `apps/api/src/services/escrow.ts` |
+| Advertising | Bolt-on module, isolated from core flows | `apps/api/src/modules/advertising` |
 | Messaging | WhatsApp Business Cloud API relay through one platform-owned number | `apps/api/src/services/messaging` |
 | Jobs / escalations | BullMQ on Redis | `apps/api/src/queues`, `apps/api/src/worker.ts` |
 | File storage | AWS S3 (presigned PUT) or Cloudinary (signed upload) | `apps/api/src/services/storage` |
@@ -63,24 +64,69 @@ Every step checks the job's current state again before acting, so a job that has
 makes the escalation a no-op. Queue job IDs are deterministic, so the same escalation
 can't be scheduled twice.
 
-### Payments (split at source)
+### Payments: channels, routing and escrow (Section 11)
 
-The rest of the codebase only calls the `PaymentProvider` interface (`onboardPayee`,
-`createSplitPayment`, `parseWebhook`, `refund`):
+**Provider-agnostic layer.** The app only talks to the `PaymentProvider` interface
+(`onboardPayee`, `createSplitPayment`, `parseWebhook`, `refund`, `payout`, and optionally
+`createDedicatedAccount`). Each gateway registers itself in
+`services/payments/index.ts` with the currencies and methods it supports. To add a bank or
+partner, implement the interface, call `registerProvider()`, and add its name to the
+`payment_provider` enum in a migration. Nothing else in the flow changes.
 
-- **Stripe Connect:** Express accounts and a hosted Checkout Session with a destination
-  charge. `application_fee_amount` is the platform fee.
-- **Paystack:** subaccounts. `transaction_charge` is the platform's flat cut, with
-  `bearer: subaccount`.
-- **Flutterwave:** subaccounts with a `flat_subaccount` charge. The API is called in major
-  units. Successful webhooks are re-verified through `/transactions/:id/verify`.
-- **Mock:** for development and tests. It is refused in production.
+- **Paystack / Flutterwave** are the primary Nigerian gateways (card, bank transfer, USSD).
+  Flutterwave webhooks are re-verified through `/transactions/:id/verify`.
+- **Stripe** takes card payments in other currencies.
+- **Mock** is for development and tests, and is refused in production.
 
-`PAYMENT_CURRENCY_ROUTES` picks the provider when a technician onboards their payouts (for
-example NGN → Paystack, KES → Flutterwave, USD → Stripe). The payment for a job always goes
-through the provider that holds the technician's payee account. Money is stored as integer
-minor units. Webhooks are signature-verified and idempotent (`webhook_events`), and an
-underpayment is rejected.
+**Routing.** The admin setting `payment_routing` sets which gateways are enabled, their
+priority for each currency (NGN: Paystack → Flutterwave → Stripe by default), and whether to
+fall back. With fallback on, if the first gateway errors while opening checkout, the next
+one is tried and the payment row is re-pointed to it. A customer can still pick a specific
+gateway. A gateway only takes part once its secret key is configured.
+
+**Channels.**
+
+- **Card:** hosted checkout.
+- **Bank transfer, per transaction:** the gateway checkout issues a one-time account.
+- **Bank transfer, per customer:** `POST /wallet/virtual-account` gives the customer a
+  permanent account number (Paystack dedicated NUBAN or a Flutterwave virtual account).
+  Every transfer into it arrives as a `virtual_account.credited` webhook and tops up the
+  wallet.
+- **USSD:** through the gateway.
+- **In-app wallet:** debited instantly.
+
+**Escrow.** Every channel feeds the same pipeline in `services/escrow.ts`:
+
+1. **Hold:** once a quote is accepted, the customer pays the invoice total into escrow
+   (`POST /jobs/:id/payments`, settlement `escrow`). The technician gets a push/WhatsApp
+   alert. By default they can't go `en_route` until the money is held
+   (`409 escrow_unfunded`; controlled by `escrow.requireFundingBeforeStart`).
+2. **Itemized capture:** when the job is completed, the customer confirms
+   (`POST /jobs/:id/confirm-completion`). Otherwise an hourly worker sweep releases it
+   after `escrow.autoReleaseHours` (48h by default). Disputed jobs never auto-release. The
+   invoice is captured line by line (labor, parts at base cost, disclosed markup), with
+   commission on labor and markup only. The breakdown is stored on `escrow_holds`.
+3. **Split payout:** the technician's share is credited to their wallet and paid out
+   through the Section 4 payouts (standard or instant). Anything held beyond the invoice
+   is refunded.
+
+If a customer pays after the job is already completed, paying counts as confirming, so
+the hold and the capture happen in one step.
+
+- **Cancellations and declined instant bookings** refund the hold. Wallet payments go back
+  to the wallet; gateway payments are refunded through the provider.
+- **Disputes:** an admin settles them with `POST /admin/jobs/:id/escrow/settle
+  {captureMinor}`. A partial capture pro-rates the commission and refunds the rest.
+  `captureMinor: 0` refunds everything and cancels the job.
+- **Refunds after capture:** `POST /admin/payments/:id/refund` claws back the technician's
+  released share pro rata.
+
+Technician promotions (Section 16) go through the same layer. `POST
+/technicians/me/promotions {method}` either debits the wallet or opens a gateway checkout.
+The boost or alert subscription starts when the webhook confirms payment.
+
+Money is stored as integer minor units. Webhooks are signature-verified and idempotent
+(`webhook_events`), and an underpayment is rejected.
 
 ### Service taxonomy (Section 2)
 
@@ -138,14 +184,10 @@ Each supercategory has one **"Other / custom"** entry:
     negotiation**. Section 6 below describes each one.
 
   Only one negotiation can be open on a quote at a time.
-- **Payment methods:** card, bank transfer to a one-time virtual account, USSD, and the
-  in-app **wallet**. The customer can choose between Paystack and Flutterwave when both
-  support the method.
-  - If the gateway is the one where the technician holds their payout account, the money
-    is split at source.
-  - Otherwise the platform collects the payment and credits the technician's share to
-    their wallet.
-  - Wallet payments settle instantly. The wallet can be topped up through any gateway.
+- **Payment methods:** card, bank transfer (a one-time account, or a permanent personal
+  account that tops up the wallet), USSD, and the in-app **wallet**. The customer can
+  choose between Paystack and Flutterwave when both support the method. Every method
+  funds escrow (see Section 11).
 - **Mandatory reviews:** see Section 7. Until the customer has reviewed every paid job,
   `POST /jobs` returns `409 review_required`.
 
@@ -354,6 +396,56 @@ Admins can also mark a seller **flagged**, **removed** or **merged**.
   clean-approval counts onto the record being kept, and citing the old record automatically
   resolves to it. The same screen holds the auto-verification settings.
 
+### Marketplace / Deals advertising (Section 12)
+
+Advertising is a bolt-on module in `apps/api/src/modules/advertising`.
+
+**Isolation from core flows**
+
+- `app.ts` mounts it last, inside a try/catch. No core file imports it, and a test enforces
+  that.
+- When `advertising.enabled` is false, every public and advertiser endpoint returns
+  `404 module_disabled` and the app hides the Deals tab. Booking, payment, chat and rating
+  work exactly the same.
+- Ads only ever appear in the **Deals** tab. The old in-flow ad slots on the discovery and
+  job screens were removed, and there are no interstitials, pop-ups or banners in core
+  flows.
+
+**What customers and technicians see**
+
+- **Featured seller cards:** only sellers verified in the Section 10 registry can be
+  featured.
+- **Brand cards:** targeted by category and segment.
+- **Organic list of verified sellers.**
+- **Seller search:** at most **one sponsored slot per 10 organic results**, placed at the
+  top of its block and labeled "Sponsored". The ratio is set by
+  `advertising.organicPerSponsored`. With fewer than 10 organic results, no sponsored
+  result is shown.
+
+**Billing.** Slot prices are in `advertising.pricing`, set per placement and currency:
+
+| Placement | Default model |
+| --- | --- |
+| Featured seller | Flat rate per day served |
+| Brand card | CPM |
+| Sponsored search | CPC |
+
+Impressions, clicks and revenue are recorded per campaign-day in `ad_daily_stats`.
+Campaigns stop serving when they reach their budget.
+
+**Advertisers.** Accounts start fully admin-managed: an admin uploads campaigns for an
+advertiser account or directly for a registry seller. Advertisers can see their campaigns
+and daily stats. The self-serve submission endpoints already exist but stay switched off
+(`403 self_serve_disabled`) until `advertising.selfServeEnabled` is turned on.
+
+**Admin tools.** Admins can approve or reject submissions with a note, create and edit
+campaigns, pause, resume or end them, set slot pricing in platform settings, and view
+revenue analytics by placement, by day and by top campaign.
+
+This module advertises products, sellers and brands. It is separate from the Section 16
+technician boosts, which rank a technician's own profile and are sold through the payments
+layer.
+
 ## Getting started
 
 Requirements: Node 20.19+ (22 recommended) and Docker (or local PostgreSQL 16 and Redis 7).
@@ -388,8 +480,9 @@ npm test          # shared unit tests, provider unit tests, API integration test
 The API integration tests need a PostgreSQL database
 (`TEST_DATABASE_URL`, default `postgres://handiwork:handiwork@localhost:5432/handiwork_test`).
 They drop and recreate the schema, then run the whole marketplace flow end to end: register,
-verify, post, escalate, quote, accept, WhatsApp relay, status changes, split payment and
-webhook, review, and an ad campaign. If PostgreSQL can't be reached, the tests are skipped
+verify, post, escalate, quote, accept, WhatsApp relay, status changes, escrow funding,
+capture, refunds and disputes, gateway fallback, virtual accounts, review, and the
+advertising module (including switching it off). If PostgreSQL can't be reached, the tests are skipped
 with a warning.
 
 ## API overview (`/v1`)
@@ -407,11 +500,11 @@ with a warning.
 | Quotes | `POST /jobs/:id/quotes`, `PUT /jobs/:id/quotes/:quoteId`, `POST …/items/:itemId/receipt`, `POST …/withdraw`, `POST …/accept`, `POST …/counter`, `POST …/counters/:counterId/respond`, `POST …/counters/:counterId/withdraw` |
 | Chat & contact | `GET /jobs/:id/conversations`, `GET/POST /jobs/:id/messages`, `GET /jobs/:id/contact` |
 | Tracking | `POST /me/location-disclosure`, `PUT /jobs/:id/location`, `GET /jobs/:id/tracking` |
-| Payments | `GET /payments/options`, `POST /jobs/:id/payments`, `GET /wallet`, `POST /wallet/topups`, `POST /webhooks/payments/:provider` |
+| Payments | `GET /payments/options`, `POST /jobs/:id/payments`, `GET /jobs/:id/escrow`, `POST /jobs/:id/confirm-completion`, `GET /wallet`, `POST /wallet/topups`, `GET/POST /wallet/virtual-account`, `POST /webhooks/payments/:provider` |
 | WhatsApp | `GET/POST /webhooks/whatsapp` |
 | Files | `POST /uploads`, `POST /uploads/:id/complete` |
-| Ads | `POST /ads`, `GET /ads/mine`, `POST /ads/:id/status`, `GET /ads/placements`, `POST /ads/:id/click` |
-| Admin | `GET /admin/jobs/:id/messages`, `GET /admin/price-challenges`, `POST /admin/price-challenges/:id/review-evidence`, `POST /admin/price-challenges/:id/resolve`, `GET/POST/PATCH /admin/sellers`, `POST /admin/sellers/:id/status`, `POST /admin/sellers/:id/merge`, `GET /admin/flags`, `POST /admin/flags/:id/resolve`, `GET /admin/rate-adjustments`, `POST /admin/rate-adjustments/:id/decide`, `POST /admin/rate-adjustments/:id/flag`, `PUT /admin/technicians/:id/rate-override`, `POST /admin/technicians/:id/recalculate-rate`, `POST /admin/technicians/:id/rating-penalties`, `GET /admin/cap-exceptions`, `POST /admin/cap-exceptions/:id/decide`, `PUT /admin/technicians/:id/markup-cap`, `GET /admin/settings`, `PUT /admin/settings/:key`, `GET/POST/PATCH /admin/categories`, `GET /admin/category-suggestions`, `POST …/:id/approve`, `POST …/:id/reject`, `GET/POST/DELETE /admin/boosts`, `POST /admin/certifications/:id/verify`, `GET /admin/stats`, `GET /admin/technicians`, `POST /admin/technicians/:id/verification`, `POST /admin/users/:id/active`, `GET /admin/escalations`, `POST /admin/escalations/:id/resolve`, `GET /admin/ads`, `POST /admin/ads/:id/review`, `POST /admin/payments/:id/refund` |
+| Marketplace (module) | `GET /marketplace/status`, `GET /marketplace/deals`, `GET /marketplace/search`, `POST /marketplace/ads/:id/click`, `GET /advertiser/campaigns`, `GET /advertiser/campaigns/:id/stats`, `POST /advertiser/campaigns` (self-serve), `POST /advertiser/campaigns/:id/status` (self-serve), `GET/POST /admin/ads/campaigns`, `PATCH /admin/ads/campaigns/:id`, `POST /admin/ads/campaigns/:id/review`, `POST /admin/ads/campaigns/:id/status`, `GET /admin/ads/analytics`, `GET /admin/ads/owners` |
+| Admin | `GET /admin/jobs/:id/messages`, `GET /admin/price-challenges`, `POST /admin/price-challenges/:id/review-evidence`, `POST /admin/price-challenges/:id/resolve`, `GET/POST/PATCH /admin/sellers`, `POST /admin/sellers/:id/status`, `POST /admin/sellers/:id/merge`, `GET /admin/flags`, `POST /admin/flags/:id/resolve`, `GET /admin/rate-adjustments`, `POST /admin/rate-adjustments/:id/decide`, `POST /admin/rate-adjustments/:id/flag`, `PUT /admin/technicians/:id/rate-override`, `POST /admin/technicians/:id/recalculate-rate`, `POST /admin/technicians/:id/rating-penalties`, `GET /admin/cap-exceptions`, `POST /admin/cap-exceptions/:id/decide`, `PUT /admin/technicians/:id/markup-cap`, `GET /admin/settings`, `PUT /admin/settings/:key`, `GET/POST/PATCH /admin/categories`, `GET /admin/category-suggestions`, `POST …/:id/approve`, `POST …/:id/reject`, `GET/POST/DELETE /admin/boosts`, `POST /admin/certifications/:id/verify`, `GET /admin/stats`, `GET /admin/technicians`, `POST /admin/technicians/:id/verification`, `POST /admin/users/:id/active`, `GET /admin/escalations`, `POST /admin/escalations/:id/resolve`, `GET /admin/escrow`, `POST /admin/jobs/:id/escrow/settle`, `GET /admin/settings/:key`, `POST /admin/payments/:id/refund` |
 
 ## Deployment notes
 
@@ -430,18 +523,21 @@ with a warning.
 
 - **Phone-number (OTP) sign-in:** it needs `@react-native-firebase/auth` in an Expo dev
   build. Email/password works in Expo Go.
-- **Escrow:** funds are split when the customer pays, after the job is marked completed.
-  Holding funds until the customer confirms would mean moving Stripe to separate charges
-  and transfers and using delayed settlement on Paystack/Flutterwave.
+- **Escrow at the gateway:** escrow is held on the platform's own account, and the
+  technician's share is paid out from their wallet. Stripe separate-charges-and-transfers
+  and the gateways' own delayed-settlement products aren't used.
+- **Dedicated account KYC:** Flutterwave needs a BVN for permanent accounts, and Paystack
+  needs the dedicated-NUBAN feature enabled on the business.
 - **WhatsApp templates:** `price_challenge_escalation` and `technician_notification` have to
   be approved in Meta Business Manager. They're used for business-initiated messages
   outside WhatsApp's 24-hour window.
-- **Section 16 specifics:** boosts and alerts can be bought from the wallet, with
-  eligibility checks that are placeholders until Section 16 arrives. Paying for them
-  through a gateway isn't wired up yet.
+- **Section 16 specifics:** boosts and alerts can be bought from the wallet or through any
+  gateway. The eligibility checks are placeholders until Section 16 arrives.
 - **Payout confirmation webhooks:** a payout is marked `sent` when the provider accepts the
   transfer. Webhooks for final settlement (such as Paystack `transfer.success`) aren't
   handled yet.
-- **Ad billing:** impressions and clicks are counted, but `spent_minor` isn't charged yet.
+- **Ad invoicing:** ad revenue is metered (`spent_minor` / `ad_daily_stats`), but advertisers
+  are still invoiced offline. Collecting it through the payments layer comes with the
+  self-serve dashboard.
 - **Search at scale:** matching uses haversine in SQL. Move to PostGIS with a GiST index when
   volume calls for it.

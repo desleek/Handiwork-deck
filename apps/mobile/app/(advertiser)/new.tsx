@@ -8,8 +8,12 @@ import { api, uploadFile } from '@/lib/api';
 import type { Category } from '@/lib/categories';
 import { useApi } from '@/lib/useApi';
 
+/** Self-serve campaign submission (Section 12); off until admins enable it — campaigns are admin-managed at launch. */
 export default function NewCampaign() {
   const { data: cats } = useApi<{ categories: Category[] }>('/categories');
+  const { data: status } = useApi<{ selfServe: boolean }>('/marketplace/status');
+  const [placement, setPlacement] = useState<'brand_card' | 'sponsored_search'>('brand_card');
+  const [keywords, setKeywords] = useState('');
   const [title, setTitle] = useState('');
   const [body, setBody] = useState('');
   const [clickUrl, setClickUrl] = useState('');
@@ -35,9 +39,11 @@ export default function NewCampaign() {
     setBusy(true);
     setError(null);
     try {
-      await api('/ads', {
+      await api('/advertiser/campaigns', {
         body: {
           title: title.trim(),
+          placement,
+          searchKeywords: keywords.split(',').map((k) => k.trim()).filter((k) => k.length >= 2),
           body: body.trim() || undefined,
           clickUrl: clickUrl.trim() || undefined,
           creativeFileId: creative ?? undefined,
@@ -54,8 +60,21 @@ export default function NewCampaign() {
     }
   };
 
+  if (status && !status.selfServe) {
+    return (
+      <Screen>
+        <Muted>Campaigns are set up by the HANDIWORK-DECK team for now. Send us your creative and targeting and we'll launch it for you.</Muted>
+      </Screen>
+    );
+  }
+
   return (
     <Screen>
+      <View style={styles.row}>
+        <Chip label="Brand card (Deals tab)" selected={placement === 'brand_card'} onPress={() => setPlacement('brand_card')} />
+        <Chip label="Sponsored search" selected={placement === 'sponsored_search'} onPress={() => setPlacement('sponsored_search')} />
+      </View>
+      {placement === 'sponsored_search' && <Field label="Search keywords (comma separated)" value={keywords} onChangeText={setKeywords} autoCapitalize="none" />}
       <Field label="Headline" value={title} onChangeText={setTitle} maxLength={80} />
       <Field label="Body" value={body} onChangeText={setBody} maxLength={280} multiline />
       <Field label="Link (shop / WhatsApp catalogue)" value={clickUrl} onChangeText={setClickUrl} autoCapitalize="none" />
@@ -72,7 +91,7 @@ export default function NewCampaign() {
           />
         ))}
       </View>
-      <Button title="Save draft" loading={busy} disabled={title.trim().length < 3} onPress={submit} />
+      <Button title="Submit for review" loading={busy} disabled={title.trim().length < 3} onPress={submit} />
       <ErrorText error={error} />
     </Screen>
   );

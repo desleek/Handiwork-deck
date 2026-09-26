@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { Switch, Text, View } from 'react-native';
-import { Button, Card, ErrorText, Field, Loading, Muted, Screen, styles } from '@/components/ui';
+import { Button, Card, Chip, ErrorText, Field, Loading, Muted, Screen, styles } from '@/components/ui';
 import { api } from '@/lib/api';
 import { useApi } from '@/lib/useApi';
 
@@ -14,12 +14,24 @@ interface Settings {
   price_challenge: { timeoutAction: 'auto_approve' | 'cancel_redirect_labor_only'; standard: object; fastTrack: object };
   rate_adjustment: { cycleDays: number; holdAnomalousSwings: boolean; tiers: { stars: number; minRating: number; adjustmentBps: number }[] };
   rating: { halfLifeDays: number };
+  escrow: { requireFundingBeforeStart: boolean; autoReleaseHours: number };
+  payment_routing: { enabledGateways: string[]; priority: Record<string, string[]>; fallbackOnError: boolean };
+  advertising: {
+    enabled: boolean;
+    selfServeEnabled: boolean;
+    organicPerSponsored: number;
+    pricing: Record<'featured_seller' | 'brand_card' | 'sponsored_search', { model: 'flat_daily' | 'cpm' | 'cpc'; rateMinor: Record<string, number> }>;
+  };
 }
+
+const GATEWAYS = ['paystack', 'flutterwave', 'stripe'] as const;
+const GATEWAY_LABEL: Record<string, string> = { paystack: 'Paystack', flutterwave: 'Flutterwave', stripe: 'Stripe' };
+const SLOT_LABEL = { featured_seller: 'Featured seller (per day)', brand_card: 'Brand card (per 1,000 views)', sponsored_search: 'Sponsored search (per click)' } as const;
 
 const toPct = (bps: number) => String(bps / 100);
 const toBps = (p: string) => Math.round(Number(p) * 100);
 
-/** Section 5: admin-configurable pricing rules. */
+/** Admin-configurable platform rules: pricing (5), rates (7a), escrow & gateway routing (11), advertising (12). */
 export default function AdminSettings() {
   const { data, error, loading, reload } = useApi<{ settings: Settings }>('/admin/settings');
   const [laborPct, setLaborPct] = useState('');
@@ -34,6 +46,9 @@ export default function AdminSettings() {
   const [rejPenalty, setRejPenalty] = useState('');
   const [cycleDays, setCycleDays] = useState('');
   const [tierPcts, setTierPcts] = useState<Record<number, string>>({});
+  const [releaseHours, setReleaseHours] = useState('');
+  const [perSponsored, setPerSponsored] = useState('');
+  const [slotNgn, setSlotNgn] = useState<Record<string, string>>({});
   const [msg, setMsg] = useState<string | null>(null);
   const [err, setErr] = useState<unknown>(null);
 
@@ -52,6 +67,9 @@ export default function AdminSettings() {
     setRejPenalty(String(s.labor_only_rejections.penaltyPoints));
     setCycleDays(String(s.rate_adjustment.cycleDays));
     setTierPcts(Object.fromEntries(s.rate_adjustment.tiers.map((t) => [t.stars, toPct(t.adjustmentBps)])));
+    setReleaseHours(String(s.escrow.autoReleaseHours));
+    setPerSponsored(String(s.advertising.organicPerSponsored));
+    setSlotNgn(Object.fromEntries(Object.entries(s.advertising.pricing).map(([k, v]) => [k, String((v.rateMinor.NGN ?? 0) / 100)])));
   }, [data]);
 
   if (loading && !data) return <Loading />;
@@ -149,6 +167,80 @@ export default function AdminSettings() {
               ...s.rate_adjustment,
               cycleDays: Number(cycleDays),
               tiers: s.rate_adjustment.tiers.map((t) => ({ ...t, adjustmentBps: toBps(tierPcts[t.stars] ?? '0') })),
+            })
+          }
+        />
+      </Card>
+      <Card>
+        <Text style={styles.label}>Escrow (Section 11)</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Text style={{ flex: 1 }}>Customer must fund escrow before the technician sets off</Text>
+          <Switch value={s.escrow.requireFundingBeforeStart} onValueChange={(v) => save('escrow', { ...s.escrow, requireFundingBeforeStart: v })} />
+        </View>
+        <Field label="Auto-release after completion (hours)" value={releaseHours} onChangeText={setReleaseHours} keyboardType="number-pad" />
+        <Button title="Save escrow" onPress={() => save('escrow', { ...s.escrow, autoReleaseHours: Number(releaseHours) })} />
+      </Card>
+      <Card>
+        <Text style={styles.label}>Payment gateway routing</Text>
+        <Muted>Tap to enable/disable. NGN order is tried first to last; with fallback on, the next gateway is tried if one fails.</Muted>
+        <View style={styles.row}>
+          {GATEWAYS.map((g) => (
+            <Chip
+              key={g}
+              label={GATEWAY_LABEL[g]!}
+              selected={s.payment_routing.enabledGateways.includes(g)}
+              onPress={() => {
+                const on = s.payment_routing.enabledGateways.includes(g);
+                const next = on ? s.payment_routing.enabledGateways.filter((x) => x !== g) : [...s.payment_routing.enabledGateways, g];
+                if (next.length) void save('payment_routing', { ...s.payment_routing, enabledGateways: next });
+              }}
+            />
+          ))}
+        </View>
+        <Muted>NGN priority: {(s.payment_routing.priority.NGN ?? []).map((g) => GATEWAY_LABEL[g] ?? g).join(' → ')}</Muted>
+        <View style={styles.row}>
+          {(s.payment_routing.priority.NGN ?? []).map((g, i, arr) =>
+            i === 0 ? null : (
+              <Chip
+                key={g}
+                label={`Prefer ${GATEWAY_LABEL[g] ?? g}`}
+                onPress={() => {
+                  const order = [...arr];
+                  [order[i - 1], order[i]] = [order[i]!, order[i - 1]!];
+                  void save('payment_routing', { ...s.payment_routing, priority: { ...s.payment_routing.priority, NGN: order } });
+                }}
+              />
+            ),
+          )}
+        </View>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Text style={{ flex: 1 }}>Fall back to the next gateway on errors</Text>
+          <Switch value={s.payment_routing.fallbackOnError} onValueChange={(v) => save('payment_routing', { ...s.payment_routing, fallbackOnError: v })} />
+        </View>
+      </Card>
+      <Card>
+        <Text style={styles.label}>Marketplace / Deals advertising (Section 12)</Text>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Text style={{ flex: 1 }}>Module enabled (off hides the Deals tab; core flows are unaffected)</Text>
+          <Switch value={s.advertising.enabled} onValueChange={(v) => save('advertising', { ...s.advertising, enabled: v })} />
+        </View>
+        <View style={{ flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' }}>
+          <Text style={{ flex: 1 }}>Self-serve advertiser submissions</Text>
+          <Switch value={s.advertising.selfServeEnabled} onValueChange={(v) => save('advertising', { ...s.advertising, selfServeEnabled: v })} />
+        </View>
+        <Field label="Organic results per sponsored slot (max 1 per …)" value={perSponsored} onChangeText={setPerSponsored} keyboardType="number-pad" />
+        {(Object.keys(SLOT_LABEL) as (keyof typeof SLOT_LABEL)[]).map((k) => (
+          <Field key={k} label={`${SLOT_LABEL[k]} — ₦`} value={slotNgn[k] ?? ''} onChangeText={(v) => setSlotNgn((x) => ({ ...x, [k]: v }))} keyboardType="decimal-pad" />
+        ))}
+        <Button
+          title="Save advertising"
+          onPress={() =>
+            save('advertising', {
+              ...s.advertising,
+              organicPerSponsored: Number(perSponsored),
+              pricing: Object.fromEntries(
+                Object.entries(s.advertising.pricing).map(([k, v]) => [k, { ...v, rateMinor: { ...v.rateMinor, NGN: Math.round(Number(slotNgn[k] ?? 0) * 100) } }]),
+              ),
             })
           }
         />

@@ -3,9 +3,8 @@ import * as Linking from 'expo-linking';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useEffect, useRef, useState } from 'react';
 import { Alert, Text, View } from 'react-native';
-import { AdSlot } from '@/components/AdSlot';
 import { LiveMap } from '@/components/LiveMap';
-import { PaymentPicker } from '@/components/PaymentPicker';
+import { EscrowPanel } from '@/components/EscrowPanel';
 import { PriceChallengePanel } from '@/components/PriceChallenge';
 import { QuoteBuilder } from '@/components/QuoteBuilder';
 import { ContactReveal } from '@/components/ContactReveal';
@@ -42,6 +41,7 @@ interface Job {
   labor_only: boolean;
   target_technician_id: string | null;
   request_accepted_at: string | null;
+  escrow_status: 'unfunded' | 'held' | 'captured' | 'refunded';
 }
 interface Detail {
   job: Job;
@@ -51,6 +51,7 @@ interface Detail {
   customer?: { first_name: string; customer_type: string; ratingAvg: number | null; ratingCount: number; paidJobs: number; completionBadge: boolean };
   customerRating?: { overall: number } | null;
   whatsappLink: string | null;
+  escrowRequired: boolean;
 }
 
 export default function JobDetail() {
@@ -71,6 +72,7 @@ export default function JobDetail() {
   const isTech = job.technician_id === user.id;
   const negotiating = job.status === 'open' || job.status === 'quoted';
   const myQuote = user.role === 'technician' ? quotes.find((q) => q.technician_id === user.id) : undefined;
+  const acceptedQuote = quotes.find((q) => q.status === 'accepted');
 
   const act = async (key: string, fn: () => Promise<unknown>) => {
     setBusy(key);
@@ -191,7 +193,8 @@ export default function JobDetail() {
       {/* ---------- technician: progress the job ---------- */}
       {isTech && job.status === 'assigned' && (
         <Button
-          title="I'm on my way"
+          title={!data.escrowRequired || job.escrow_status === 'held' ? "I'm on my way" : 'Waiting for payment to be secured'}
+          disabled={data.escrowRequired && job.escrow_status !== 'held'}
           loading={busy === 'en_route'}
           onPress={() =>
             act('en_route', async () => {
@@ -215,10 +218,19 @@ export default function JobDetail() {
 
       {(isCustomer || isTech || user.role === 'admin') && !negotiating && job.status !== 'cancelled' && job.technician_id && <InvoiceCard jobId={job.id} isTech={isTech} />}
 
-      {/* ---------- customer: pay & mandatory review ---------- */}
-      {isCustomer && job.status === 'completed' && job.budget_minor != null && (
-        <PaymentPicker jobId={job.id} amountMinor={job.budget_minor} currency={job.currency} onPaid={reload} />
+      {/* ---------- Section 11: escrow (fund → confirm & release) ---------- */}
+      {(isCustomer || isTech || user.role === 'admin') && acceptedQuote && (
+        <EscrowPanel
+          jobId={job.id}
+          status={job.status}
+          currency={job.currency}
+          amountMinor={Number(acceptedQuote.amount_minor)}
+          role={isCustomer ? 'customer' : isTech ? 'technician' : 'admin'}
+          onChange={reload}
+        />
       )}
+
+      {/* ---------- mandatory reviews ---------- */}
       {isCustomer && job.status === 'paid' && !data.review && <ReviewForm jobId={job.id} onDone={reload} />}
       {isTech && job.status === 'paid' && data.customerRating === null && (
         <CustomerRatingForm jobId={job.id} onDone={reload} />
@@ -247,7 +259,6 @@ export default function JobDetail() {
       )}
 
       <ErrorText error={actionError} />
-      <AdSlot categoryId={job.category_id} />
 
       {(isCustomer || isTech || user.role === 'admin') && (
         <Button title="Audit trail" variant="secondary" onPress={() => router.push(`/job/audit/${job.id}`)} />

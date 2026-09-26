@@ -21,7 +21,59 @@ const KIND_LABEL: Record<string, string> = {
   refund: 'Refund',
   withdrawal: 'Withdrawal',
   adjustment: 'Adjustment',
+  promotion: 'Promotion',
+  fee: 'Fee',
 };
+
+interface VirtualAccount {
+  provider: string;
+  account_number: string;
+  account_name: string | null;
+  bank_name: string | null;
+}
+
+/** Section 11: a dedicated account number — any transfer into it tops up the wallet. */
+function VirtualAccountCard() {
+  const { data, reload } = useApi<{ account: VirtualAccount | null; available: boolean }>('/wallet/virtual-account?currency=NGN');
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<unknown>(null);
+  if (!data || (!data.account && !data.available)) return null;
+  const create = async () => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api('/wallet/virtual-account', { body: { currency: 'NGN' } });
+      await reload();
+    } catch (e) {
+      setError(e);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <Card>
+      <Text style={styles.label}>Your transfer account</Text>
+      {data.account ? (
+        <>
+          <Text selectable style={{ fontSize: 20, fontWeight: '800', color: colors.ink, letterSpacing: 1 }}>
+            {data.account.account_number}
+          </Text>
+          <Muted>
+            {data.account.bank_name ?? 'Partner bank'}
+            {data.account.account_name ? ` · ${data.account.account_name}` : ''}
+          </Muted>
+          <Muted>Transfer any amount from your bank app — it lands in your wallet automatically.</Muted>
+        </>
+      ) : (
+        <>
+          <Muted>Get a permanent account number just for you. Transfers into it top up your wallet.</Muted>
+          <Button title="Get my account number" variant="secondary" loading={busy} onPress={create} />
+        </>
+      )}
+      <ErrorText error={error} />
+    </Card>
+  );
+}
 
 export default function WalletScreen() {
   const { user } = useAuth();
@@ -81,7 +133,8 @@ export default function WalletScreen() {
           <ErrorText error={topupError} />
         </Card>
       )}
-      {user?.role === 'technician' && <Muted>Earnings from jobs paid through the platform or by wallet land here.</Muted>}
+      {user?.role === 'customer' && <VirtualAccountCard />}
+      {user?.role === 'technician' && <Muted>Your share of each job lands here when the customer's escrow is released.</Muted>}
 
       <Text style={styles.label}>Activity</Text>
       {data?.entries.length === 0 && <Muted>No wallet activity yet.</Muted>}
