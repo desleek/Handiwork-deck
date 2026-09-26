@@ -9,7 +9,7 @@ import { MockProvider } from '../src/services/payments/providers/mock';
 import { processChallengeStep } from '../src/services/priceChallenges';
 import { recalcRateAdjustment, runRateCycle } from '../src/services/rateAdjustment';
 import { setStorageDriver } from '../src/services/storage/index';
-import { bearer, categoryId, dbAvailable, fullScores, resetDb } from './helpers';
+import { bearer, categoryId, dbAvailable, fullScores, payOnCompletion, resetDb } from './helpers';
 
 const hasDb = await dbAvailable();
 const app = createApp();
@@ -65,6 +65,7 @@ async function review(cust: string, jobId: string, n: number) {
 describe.skipIf(!hasDb)('Sections 6, 7, 7a: quote responses, dual ratings, labor rate adjustment', () => {
   beforeAll(async () => {
     await resetDb();
+    await payOnCompletion();
     plumbing = await categoryId('plumbing');
     id.admin = await register('admin', '+2348200000001', { role: 'customer', fullName: 'Ops Admin', customerType: 'office' });
     await pool.query(`UPDATE users SET role = 'admin', customer_type = NULL, email = 'ops@example.com' WHERE id = $1`, [id.admin]);

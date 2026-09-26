@@ -92,6 +92,24 @@ export class FlutterwaveProvider implements PaymentProvider {
     return { providerRef: String(data.id), status: data.status === 'SUCCESSFUL' ? ('sent' as const) : ('processing' as const) };
   }
 
+  /** Flutterwave virtual account number (permanent accounts need the customer's BVN). */
+  async createDedicatedAccount(input: Parameters<NonNullable<PaymentProvider['createDedicatedAccount']>>[0]) {
+    const txRef = `va_${input.userId}`;
+    const [first, ...rest] = input.name.split(/\s+/);
+    const data = await this.call<{ account_number: string; bank_name: string; order_ref: string }>('POST', '/virtual-account-numbers', {
+      email: input.email,
+      tx_ref: txRef,
+      is_permanent: Boolean(input.bvn),
+      bvn: input.bvn,
+      firstname: first,
+      lastname: rest.join(' ') || first,
+      phonenumber: input.phone,
+      narration: `HANDIWORK ${input.name}`,
+      currency: input.currency,
+    });
+    return { providerRef: txRef, accountNumber: data.account_number, accountName: input.name, bankName: data.bank_name };
+  }
+
   async parseWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>): Promise<NormalizedWebhookEvent> {
     const sig = header(headers, 'verif-hash');
     if (
@@ -116,6 +134,10 @@ export class FlutterwaveProvider implements PaymentProvider {
           'GET',
           `/transactions/${data.id}/verify`,
         );
+        if (verified.status === 'successful' && verified.tx_ref === data.tx_ref && data.tx_ref.startsWith('va_')) {
+          // Transfer into a customer's dedicated virtual account.
+          return { id, type: 'virtual_account.credited', accountRef: data.tx_ref, amount: toMinor(verified.amount, verified.currency), currency: verified.currency, raw: payload };
+        }
         if (verified.status === 'successful' && verified.tx_ref === data.tx_ref) {
           return {
             id,

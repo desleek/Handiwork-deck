@@ -5,6 +5,7 @@ import { env } from '../../config/env';
 import { one, pool, tx } from '../../db/pool';
 import { conflict, forbidden, notFound } from '../../lib/errors';
 import { jobs, minutes } from '../../queues/index';
+import { releaseEscrowOnExit } from '../escrow';
 import { setLiveJobAccess } from '../liveLocation';
 
 const REF_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // no 0/O/1/I
@@ -105,13 +106,20 @@ export async function afterTransition(job: JobRecord): Promise<void> {
       break;
     case 'completed':
       await liveAccess(false);
-      await notify(job.customer_id, 'Job completed', `Please review and pay for #${job.ref}.`);
+      // Section 11: starts the escrow confirmation window (auto-release sweep).
+      await pool.query('UPDATE jobs SET completed_at = now() WHERE id = $1', [job.id]);
+      await notify(job.customer_id, 'Job completed', `Confirm the work on #${job.ref} to release payment, or raise a dispute.`);
       break;
     case 'paid':
-      await notify(job.technician_id, 'Payment received', `The customer has paid for #${job.ref}.`);
+      await notify(job.technician_id, 'Payment released', `Escrow for #${job.ref} was released to your wallet.`);
+      break;
+    case 'open':
+      // An instant booking was declined: money held for it goes back.
+      await releaseEscrowOnExit(job);
       break;
     case 'cancelled':
       await liveAccess(false);
+      await releaseEscrowOnExit(job);
       await notify(job.customer_id, 'Job cancelled', `#${job.ref} was cancelled.`);
       await notify(job.technician_id, 'Job cancelled', `#${job.ref} was cancelled.`);
       break;

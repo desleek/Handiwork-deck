@@ -22,6 +22,23 @@ export interface PayeeOnboardingResult {
   recipientRef?: string;
 }
 
+export interface DedicatedAccountInput {
+  userId: string;
+  email?: string;
+  name: string;
+  phone?: string;
+  currency: string;
+  /** Some providers require a BVN for permanent accounts (Flutterwave). */
+  bvn?: string;
+}
+
+export interface DedicatedAccount {
+  providerRef: string;
+  accountNumber: string;
+  accountName: string | null;
+  bankName: string | null;
+}
+
 export interface PayoutInput {
   /** Our payout id; idempotency key / provider reference. */
   reference: string;
@@ -60,7 +77,7 @@ export interface SplitPaymentResult {
   raw?: unknown;
 }
 
-export type NormalizedEventType = 'payment.succeeded' | 'payment.failed' | 'refund.succeeded' | 'ignored';
+export type NormalizedEventType = 'payment.succeeded' | 'payment.failed' | 'refund.succeeded' | 'virtual_account.credited' | 'ignored';
 
 export interface NormalizedWebhookEvent {
   id: string; // provider event id, for idempotency
@@ -70,6 +87,8 @@ export interface NormalizedWebhookEvent {
   reference?: string;
   amount?: MinorUnits;
   currency?: string;
+  /** virtual_account.credited: the dedicated account's provider reference (e.g. Paystack customer code). */
+  accountRef?: string;
   /** For refunds: whether `amount` is the running total refunded (Stripe) rather than this refund alone. */
   amountIsCumulative?: boolean;
   raw: unknown;
@@ -88,6 +107,11 @@ export interface PaymentProvider {
   refund(input: { providerRef: string; amount?: MinorUnits; currency: string }): Promise<{ refundRef: string }>;
   /** Sends a technician's withdrawal to their bank / connected account. */
   payout(input: PayoutInput): Promise<PayoutResult>;
+  /**
+   * Optional: a dedicated (per-customer) virtual bank account. Transfers into it
+   * arrive as `virtual_account.credited` webhooks and top up the customer's wallet.
+   */
+  createDedicatedAccount?(input: DedicatedAccountInput): Promise<DedicatedAccount>;
 }
 
 export class WebhookSignatureError extends Error {

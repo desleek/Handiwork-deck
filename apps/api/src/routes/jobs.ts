@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { env } from '../config/env';
 import { one, query, tx } from '../db/pool';
+import { getSetting } from '../services/settings';
 import { badRequest, conflict, forbidden, HttpError, notFound } from '../lib/errors';
 import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
@@ -291,7 +292,16 @@ jobsRouter.post('/jobs/:id/status', authenticate, requireUser('customer', 'techn
       throw new HttpError(409, 'Attach receipts for the listed parts before completing the job', 'receipts_required', { lines: inv.missingReceipts });
     }
   }
-  const job = await transitionJob(jobId, b.status, { id: user.id, role: user.role }, { note: b.note });
+  const gate = b.status === 'en_route' && (await getSetting('escrow')).requireFundingBeforeStart;
+  const job = await transitionJob(jobId, b.status, { id: user.id, role: user.role }, {
+    note: b.note,
+    // Section 11: the technician only sets off once the customer's payment is secured in escrow.
+    extra: async (_db, current) => {
+      if (gate && (current as JobRecord & { escrow_status: string }).escrow_status !== 'held') {
+        throw new HttpError(409, 'Waiting for the customer to fund this job into escrow', 'escrow_unfunded');
+      }
+    },
+  });
   // The relay stays open through completion so the parties can sort out payment; it closes once paid.
   if (job.status === 'cancelled') {
     await query('UPDATE conversations SET is_open = false WHERE job_id = $1', [jobId]);

@@ -4,6 +4,7 @@ import helmet from 'helmet';
 import { pinoHttp } from 'pino-http';
 import { logger } from './lib/logger';
 import { errorHandler, notFoundHandler } from './middleware/errors';
+import { advertisingModule } from './modules/advertising/index';
 import { adminRouter } from './routes/admin';
 import { adminPricingRouter } from './routes/adminPricing';
 import { adminQualityRouter } from './routes/adminQuality';
@@ -12,7 +13,6 @@ import { categoriesRouter } from './routes/categories';
 import { chatRouter } from './routes/chat';
 import { discoverRouter } from './routes/discover';
 import { quotesRouter } from './routes/quotes';
-import { adsRouter } from './routes/ads';
 import { healthRouter } from './routes/health';
 import { jobRequestsRouter } from './routes/jobRequests';
 import { priceChallengesRouter } from './routes/priceChallenges';
@@ -53,12 +53,19 @@ export function createApp() {
     trackingRouter,
     paymentsRouter,
     uploadsRouter,
-    adsRouter,
     adminRouter,
     adminTaxonomyRouter,
     adminPricingRouter,
     adminQualityRouter,
   );
+
+  // Section 12: bolt-on modules mount last. Core routes never import them, and a
+  // module that fails to load is skipped rather than taking the app down.
+  try {
+    app.use('/v1', advertisingModule());
+  } catch (err) {
+    logger.error({ err }, 'advertising module failed to load; continuing without it');
+  }
 
   app.use(notFoundHandler);
   app.use(errorHandler);

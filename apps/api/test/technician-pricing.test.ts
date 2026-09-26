@@ -5,7 +5,7 @@ import { pool } from '../src/db/pool';
 import { InMemoryScheduler, jobs } from '../src/queues/index';
 import { MockProvider } from '../src/services/payments/providers/mock';
 import { processPayout } from '../src/services/payouts';
-import { bearer, categoryId, dbAvailable, fullScores, resetDb } from './helpers';
+import { bearer, categoryId, dbAvailable, fullScores, payOnCompletion, resetDb } from './helpers';
 
 const hasDb = await dbAvailable();
 const app = createApp();
@@ -48,6 +48,7 @@ async function reviewAll() {
 describe.skipIf(!hasDb)('Sections 4, 5, 5a: technician flow, pricing model, Demand Notice', () => {
   beforeAll(async () => {
     await resetDb();
+    await payOnCompletion();
     plumbing = await categoryId('plumbing');
     electrical = await categoryId('electrical');
     id.admin = await register(U.admin, '+2348100000001', { role: 'customer', fullName: 'Ops Admin', customerType: 'office' });
@@ -210,7 +211,7 @@ describe.skipIf(!hasDb)('Sections 4, 5, 5a: technician flow, pricing model, Dema
       expect(cust.parts[0]).toMatchObject({ baseMinor: 6_000_000, markupBps: 2000, markupMinor: 1_200_000, receiptRequired: true });
 
       const pay = await request(app).post(`/v1/jobs/${id.pricedJob}/payments`).set(as(U.cust)).send({ method: 'card' });
-      expect(pay.body).toMatchObject({ amountMinor: 7_720_000, platformFeeMinor: 330_000, settlement: 'platform_collect' });
+      expect(pay.body).toMatchObject({ amountMinor: 7_720_000, platformFeeMinor: 330_000, settlement: 'escrow' });
       const raw = JSON.stringify({ id: 'evt_priced', type: 'payment.succeeded', reference: pay.body.paymentId, amount: 7_720_000 });
       await request(app).post('/v1/webhooks/payments/mock').set('x-mock-signature', MockProvider.sign(raw)).set('Content-Type', 'application/json').send(raw);
       const w = await request(app).get('/v1/wallet').set(as(U.tech));

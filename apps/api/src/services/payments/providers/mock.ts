@@ -25,7 +25,20 @@ export class MockProvider implements PaymentProvider {
       throw new WebhookSignatureError('mock');
     }
     const payload = JSON.parse(rawBody.toString('utf8'));
-    return { id: payload.id ?? randomUUID(), type: payload.type, providerRef: payload.reference, reference: payload.reference, amount: payload.amount, raw: payload };
+    return {
+      id: payload.id ?? randomUUID(),
+      type: payload.type,
+      providerRef: payload.reference,
+      reference: payload.reference,
+      accountRef: payload.accountRef,
+      amount: payload.amount,
+      raw: payload,
+    };
+  }
+
+  async createDedicatedAccount(input: Parameters<NonNullable<PaymentProvider['createDedicatedAccount']>>[0]) {
+    const digits = input.userId.replace(/\D/g, '').padEnd(10, '0').slice(0, 10);
+    return { providerRef: `mock_va_${input.userId}`, accountNumber: digits, accountName: `HANDIWORK/${input.name}`, bankName: 'Mock Bank' };
   }
 
   async payout(input: Parameters<PaymentProvider['payout']>[0]) {

@@ -8,7 +8,7 @@ import { parse } from '../middleware/validate';
 import { jobs as scheduler } from '../queues/index';
 import { audit } from '../services/audit';
 import { refreshQuoteTotals } from '../services/jobs/quotes';
-import { allSettings, isSettingKey, setSetting } from '../services/settings';
+import { allSettings, getSetting, isSettingKey, setSetting } from '../services/settings';
 
 /** Section 5/5a admin tools: Demand Notice cases, per-technician cap overrides, pricing settings. */
 export const adminPricingRouter = Router();
@@ -100,6 +100,12 @@ adminPricingRouter.put('/admin/technicians/:id/markup-cap', async (req, res) => 
 
 adminPricingRouter.get('/admin/settings', async (_req, res) => {
   res.json({ settings: await allSettings() });
+});
+
+adminPricingRouter.get('/admin/settings/:key', async (req, res) => {
+  const key = String(req.params.key);
+  if (!isSettingKey(key)) throw notFound('Setting');
+  res.json({ key, value: await getSetting(key) });
 });
 
 adminPricingRouter.put('/admin/settings/:key', async (req, res) => {

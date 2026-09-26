@@ -112,6 +112,55 @@ export const SETTINGS = {
     }),
     default: { cycleDays: DEFAULT_RATE_CYCLE_DAYS, holdAnomalousSwings: true, tiers: DEFAULT_RATE_TIERS },
   },
+  /** Section 11: escrow — must the customer fund before the technician sets off, and when does it auto-release? */
+  escrow: {
+    schema: z.object({ requireFundingBeforeStart: z.boolean(), autoReleaseHours: z.number().int().min(1).max(24 * 30) }),
+    default: { requireFundingBeforeStart: true, autoReleaseHours: 48 },
+  },
+  /** Section 11: gateway routing — priority per currency, which gateways are enabled, and fallback on errors. */
+  payment_routing: {
+    schema: z.object({
+      enabledGateways: z.array(z.string().min(2).max(40)).min(1),
+      priority: z.record(z.string(), z.array(z.string().min(2).max(40)).min(1)),
+      fallbackOnError: z.boolean(),
+    }),
+    default: {
+      enabledGateways: ['paystack', 'flutterwave', 'stripe'],
+      // Flutterwave and Paystack are the primary Nigerian gateways.
+      priority: {
+        NGN: ['paystack', 'flutterwave', 'stripe'],
+        GHS: ['paystack', 'flutterwave'],
+        KES: ['flutterwave', 'paystack'],
+        UGX: ['flutterwave'],
+        default: ['stripe', 'flutterwave', 'paystack'],
+      },
+      fallbackOnError: true,
+    },
+  },
+  /** Section 12: the advertising module (a bolt-on; disabling it never affects core flows). */
+  advertising: {
+    schema: z.object({
+      enabled: z.boolean(),
+      selfServeEnabled: z.boolean(),
+      /** At most one sponsored result per this many organic results. */
+      organicPerSponsored: z.number().int().min(1).max(100),
+      /** Slot pricing per placement. */
+      pricing: z.record(
+        z.enum(['featured_seller', 'brand_card', 'sponsored_search']),
+        z.object({ model: z.enum(['flat_daily', 'cpm', 'cpc']), rateMinor: money }),
+      ),
+    }),
+    default: {
+      enabled: true,
+      selfServeEnabled: false,
+      organicPerSponsored: 10,
+      pricing: {
+        featured_seller: { model: 'flat_daily' as const, rateMinor: { NGN: 500_000, USD: 500 } },
+        brand_card: { model: 'cpm' as const, rateMinor: { NGN: 200_000, USD: 200 } },
+        sponsored_search: { model: 'cpc' as const, rateMinor: { NGN: 5_000, USD: 10 } },
+      },
+    },
+  },
   /** Section 10: graduated trust — auto-verify provisional sellers after N clean approvals (off until volume grows). */
   seller_registry: {
     schema: z.object({ autoVerifyEnabled: z.boolean(), cleanApprovalsRequired: z.number().int().min(1).max(1000) }),

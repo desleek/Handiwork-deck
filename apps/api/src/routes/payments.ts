@@ -1,40 +1,36 @@
-import { PAYMENT_METHOD_LABEL, PAYMENT_METHODS, type PaymentMethod } from '@handiwork/shared';
+import { PAYMENT_METHOD_LABEL, PAYMENT_METHODS } from '@handiwork/shared';
 import express, { Router } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
-import { env } from '../config/env';
 import { one, query, tx } from '../db/pool';
-import { badRequest, conflict, notFound } from '../lib/errors';
+import { badRequest, conflict, HttpError, notFound } from '../lib/errors';
 import { logger } from '../lib/logger';
-import { type AppUser, authenticate, currentUser, requireUser } from '../middleware/auth';
+import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
+import { confirmCompletion, type FundOutcome, fundEscrow, notifyFunded, runGatewayRefunds } from '../services/escrow';
 import { invoiceFor } from '../services/jobs/invoice';
-import { afterTransition, type JobRecord, transitionJob } from '../services/jobs/lifecycle';
+import { afterTransition } from '../services/jobs/lifecycle';
+import { candidatesOrReject, startCheckout } from '../services/payments/checkout';
 import {
-  availableGateways,
-  chooseGateway,
+  dedicatedAccountGateway,
+  type GatewayMethod,
+  gatewaysFor,
   getProvider,
   isProviderName,
   type NormalizedWebhookEvent,
   type ProviderName,
   WebhookSignatureError,
 } from '../services/payments/index';
+import { activatePromotion } from '../services/promotions';
+import { getSetting } from '../services/settings';
 import { postToWallet } from '../services/wallet';
 
 export const paymentsRouter = Router();
 
-type GatewayMethod = Exclude<PaymentMethod, 'wallet'>;
-
-/** Section 5 commission: labor and disclosed markup only, never the base cost of parts. */
-async function splitForJob(jobId: string) {
-  const inv = await invoiceFor(jobId);
-  return { gross: inv.totals.total, platformFee: inv.commission.platformFee, payeeAmount: inv.commission.technicianPayout };
-}
-
 /** Payment methods the customer can choose from for a currency (card, virtual account, USSD, wallet). */
 paymentsRouter.get('/payments/options', authenticate, requireUser(), async (req, res) => {
   const { currency } = parse(z.object({ currency: z.string().length(3).toUpperCase() }), req.query);
-  const gateways = availableGateways(currency);
+  const gateways = await gatewaysFor(currency);
   const wallet = await one<{ balance_minor: number }>('SELECT balance_minor FROM wallets WHERE user_id = $1 AND currency = $2', [
     currentUser(req).id,
     currency,
@@ -45,7 +41,7 @@ paymentsRouter.get('/payments/options', authenticate, requireUser(), async (req,
     providers: method === 'wallet' ? [] : gateways.filter((g) => g.methods.includes(method)).map((g) => g.provider),
     ...(method === 'wallet' ? { balanceMinor: wallet?.balance_minor ?? 0 } : {}),
   })).filter((m) => m.method === 'wallet' || m.providers.length > 0);
-  res.json({ currency, methods });
+  res.json({ currency, methods, virtualAccounts: !!(await dedicatedAccountGateway(currency)) });
 });
 
 const PayBody = z.object({
@@ -54,43 +50,50 @@ const PayBody = z.object({
   provider: z.enum(['stripe', 'paystack', 'flutterwave', 'mock']).optional(),
 });
 
+const FUNDABLE = ['assigned', 'en_route', 'in_progress', 'completed'];
+
 /**
- * Customer pays for a completed job.
- *  - wallet: settled instantly from the customer's wallet; technician's share credited to theirs.
- *  - gateway on the technician's payout provider: split at source (platform fee to us, rest to them).
- *  - any other gateway: platform collects, technician's share is credited to their wallet on success.
+ * Section 11: the customer funds the accepted quote into escrow, through any
+ * channel. Held funds are captured itemized when the customer confirms the work
+ * (or auto-released); paying after completion counts as confirming.
  */
 paymentsRouter.post('/jobs/:id/payments', authenticate, requireUser('customer'), async (req, res) => {
   const jobId = parse(z.uuid(), req.params.id);
   const b = parse(PayBody, req.body ?? {});
   const customer = currentUser(req);
-  const job = await one(
-    `SELECT j.*, tp.payout_provider, tp.payout_account_ref
-       FROM jobs j LEFT JOIN technician_profiles tp ON tp.user_id = j.technician_id
-      WHERE j.id = $1 AND j.customer_id = $2`,
-    [jobId, customer.id],
-  );
+  const job = await one('SELECT * FROM jobs WHERE id = $1 AND customer_id = $2', [jobId, customer.id]);
   if (!job) throw notFound('Job');
-  if (job.status !== 'completed') throw conflict('Payment is taken once the technician marks the job completed');
-  const split = await splitForJob(jobId);
+  if (!FUNDABLE.includes(job.status)) throw conflict('Payment opens once you accept a quote');
+  if (job.escrow_status !== 'unfunded') throw new HttpError(409, 'This job is already paid into escrow', 'already_funded');
+  const inv = await invoiceFor(jobId);
+  const amount = inv.totals.total;
+  const fee = inv.commission.platformFee;
 
   if (b.method === 'wallet') {
-    const paid = await tx(async (db) => {
-      await db.query('SELECT 1 FROM jobs WHERE id = $1 FOR UPDATE', [jobId]);
+    const r = await tx(async (db) => {
+      const locked = await one('SELECT escrow_status FROM jobs WHERE id = $1 FOR UPDATE', [jobId], db);
+      if (locked.escrow_status !== 'unfunded') throw new HttpError(409, 'This job is already paid into escrow', 'already_funded');
       const payment = await one(
         `INSERT INTO payments (job_id, payer_id, payee_id, provider, provider_ref, amount_minor, platform_fee_minor, currency,
                                status, method, settlement)
-         VALUES ($1, $2, $3, 'wallet', gen_random_uuid()::text, $4, $5, $6, 'succeeded', 'wallet', 'wallet') RETURNING *`,
-        [jobId, customer.id, job.technician_id, split.gross, split.platformFee, job.currency],
+         VALUES ($1, $2, $3, 'wallet', gen_random_uuid()::text, $4, $5, $6, 'succeeded', 'wallet', 'escrow') RETURNING *`,
+        [jobId, customer.id, job.technician_id, amount, fee, job.currency],
         db,
       );
-      await postToWallet(db, { userId: customer.id, currency: job.currency, amountMinor: -split.gross, kind: 'job_payment', paymentId: payment.id, jobId, memo: `Job ${job.ref}` });
-      await postToWallet(db, { userId: job.technician_id, currency: job.currency, amountMinor: split.payeeAmount, kind: 'job_earning', paymentId: payment.id, jobId, memo: `Job ${job.ref}` });
-      const updated = await markJobPaid(db, jobId, payment.id);
-      return { payment, updated };
+      await postToWallet(db, { userId: customer.id, currency: job.currency, amountMinor: -amount, kind: 'job_payment', paymentId: payment.id, jobId, memo: `Job ${job.ref} (escrow)` });
+      return { payment, ...(await fundEscrow(db, payment)) };
     });
-    if (paid.updated) await afterTransition(paid.updated);
-    res.status(201).json({ paymentId: paid.payment.id, status: 'succeeded', method: 'wallet', amountMinor: split.gross, platformFeeMinor: split.platformFee, currency: job.currency });
+    await afterPaymentEvent(r);
+    res.status(201).json({
+      paymentId: r.payment.id,
+      status: 'succeeded',
+      method: 'wallet',
+      settlement: 'escrow',
+      escrow: r.outcome,
+      amountMinor: amount,
+      platformFeeMinor: fee,
+      currency: job.currency,
+    });
     return;
   }
 
@@ -102,29 +105,20 @@ paymentsRouter.post('/jobs/:id/payments', authenticate, requireUser('customer'),
     [jobId, method, b.provider ?? null],
   );
   if (existing) {
-    res.json({ paymentId: existing.id, provider: existing.provider, method, checkoutUrl: existing.checkout_url });
+    res.json({ paymentId: existing.id, provider: existing.provider, method, settlement: 'escrow', amountMinor: amount, checkoutUrl: existing.checkout_url });
     return;
   }
 
-  let providerName: ProviderName;
-  try {
-    providerName = chooseGateway(job.currency, method, { requested: b.provider, preferred: job.payout_provider });
-  } catch (err) {
-    throw badRequest((err as Error).message);
-  }
-  const splitAtSource = providerName === job.payout_provider && !!job.payout_account_ref;
-  const settlement = splitAtSource ? 'split' : 'platform_collect';
-
+  const candidates = await candidatesOrReject(job.currency, method, b.provider);
   const payment = await one(
     `INSERT INTO payments (job_id, payer_id, payee_id, provider, provider_ref, amount_minor, platform_fee_minor, currency, method, settlement)
-     VALUES ($1, $2, $3, $4, gen_random_uuid()::text, $5, $6, $7, $8, $9) RETURNING id`,
-    [jobId, customer.id, job.technician_id, providerName, split.gross, split.platformFee, job.currency, method, settlement],
+     VALUES ($1, $2, $3, $4, gen_random_uuid()::text, $5, $6, $7, $8, 'escrow') RETURNING id`,
+    [jobId, customer.id, job.technician_id, candidates[0], amount, fee, job.currency, method],
   );
-  const result = await startCheckout(payment.id, providerName, {
-    amount: split.gross,
-    platformFee: split.platformFee,
+  const checkout = await startCheckout(payment.id, candidates, {
+    amount,
+    platformFee: fee,
     currency: job.currency,
-    payeeAccountRef: splitAtSource ? job.payout_account_ref : undefined,
     method,
     customer,
     description: `HANDIWORK-DECK job ${job.ref}: ${job.title}`,
@@ -132,58 +126,43 @@ paymentsRouter.post('/jobs/:id/payments', authenticate, requireUser('customer'),
   });
   res.status(201).json({
     paymentId: payment.id,
-    provider: providerName,
+    provider: checkout.provider,
     method,
-    settlement,
-    amountMinor: split.gross,
-    platformFeeMinor: split.platformFee,
+    settlement: 'escrow',
+    amountMinor: amount,
+    platformFeeMinor: fee,
     currency: job.currency,
-    checkoutUrl: result.checkoutUrl ?? null,
+    checkoutUrl: checkout.checkoutUrl,
   });
 });
 
-async function startCheckout(
-  paymentId: string,
-  providerName: ProviderName,
-  p: {
-    amount: number;
-    platformFee: number;
-    currency: string;
-    payeeAccountRef?: string;
-    method: GatewayMethod;
-    customer: AppUser;
-    description: string;
-    metadata: Record<string, string>;
-  },
-) {
-  try {
-    const result = await getProvider(providerName).createSplitPayment({
-      reference: paymentId,
-      amount: p.amount,
-      platformFee: p.platformFee,
-      currency: p.currency,
-      payeeAccountRef: p.payeeAccountRef,
-      methods: [p.method],
-      customer: { email: p.customer.email ?? undefined, name: p.customer.full_name, phone: p.customer.phone_e164 ?? undefined },
-      description: p.description,
-      callbackUrl: `${env.PUBLIC_BASE_URL}/v1/payments/return`,
-      metadata: p.metadata,
-    });
-    await query('UPDATE payments SET provider_ref = $2, checkout_url = $3 WHERE id = $1', [paymentId, result.providerRef, result.checkoutUrl ?? null]);
-    return result;
-  } catch (err) {
-    await query(`UPDATE payments SET status = 'failed' WHERE id = $1`, [paymentId]);
-    throw err;
-  }
+async function afterPaymentEvent(r: FundOutcome) {
+  if (r.job) await afterTransition(r.job);
+  await runGatewayRefunds(r.refunds);
+  if (r.outcome === 'held' && r.fundedJobId) await notifyFunded(r.fundedJobId);
 }
 
-async function markJobPaid(db: pg.PoolClient, jobId: string, paymentId: string): Promise<JobRecord | null> {
-  const current = await one('SELECT status FROM jobs WHERE id = $1', [jobId], db);
-  if (current?.status !== 'completed') return null;
-  const job = await transitionJob(jobId, 'paid', { id: null, role: 'system' }, { db, note: `payment ${paymentId}` });
-  await db.query('UPDATE conversations SET is_open = false WHERE job_id = $1', [jobId]);
-  return job;
-}
+/** Escrow state for a job: what is held, and the itemized capture once released. */
+paymentsRouter.get('/jobs/:id/escrow', authenticate, requireUser(), async (req, res) => {
+  const jobId = parse(z.uuid(), req.params.id);
+  const user = currentUser(req);
+  const job = await one('SELECT customer_id, technician_id, status, escrow_status, completed_at FROM jobs WHERE id = $1', [jobId]);
+  if (!job || (user.role !== 'admin' && user.id !== job.customer_id && user.id !== job.technician_id)) throw notFound('Job');
+  const hold = await one('SELECT * FROM escrow_holds WHERE job_id = $1', [jobId]);
+  const { autoReleaseHours } = await getSetting('escrow');
+  const autoReleaseAt =
+    job.status === 'completed' && job.escrow_status === 'held' && job.completed_at
+      ? new Date(new Date(job.completed_at).getTime() + autoReleaseHours * 3_600_000)
+      : null;
+  res.json({ status: job.escrow_status, hold, autoReleaseAt });
+});
+
+/** Customer confirms the work is done: escrow is captured itemized and the technician is paid. */
+paymentsRouter.post('/jobs/:id/confirm-completion', authenticate, requireUser('customer'), async (req, res) => {
+  const jobId = parse(z.uuid(), req.params.id);
+  const { job, capturedMinor } = await confirmCompletion(jobId, currentUser(req).id);
+  res.json({ job, capturedMinor });
+});
 
 // ---------------------------------------------------------------- wallet
 paymentsRouter.get('/wallet', authenticate, requireUser(), async (req, res) => {
@@ -211,18 +190,13 @@ const TopupBody = z.object({
 paymentsRouter.post('/wallet/topups', authenticate, requireUser('customer'), async (req, res) => {
   const b = parse(TopupBody, req.body);
   const user = currentUser(req);
-  let providerName: ProviderName;
-  try {
-    providerName = chooseGateway(b.currency, b.method, { requested: b.provider });
-  } catch (err) {
-    throw badRequest((err as Error).message);
-  }
+  const candidates = await candidatesOrReject(b.currency, b.method, b.provider);
   const payment = await one(
     `INSERT INTO payments (purpose, payer_id, provider, provider_ref, amount_minor, platform_fee_minor, currency, method, settlement)
      VALUES ('wallet_topup', $1, $2, gen_random_uuid()::text, $3, 0, $4, $5, 'platform_collect') RETURNING id`,
-    [user.id, providerName, b.amountMinor, b.currency, b.method],
+    [user.id, candidates[0], b.amountMinor, b.currency, b.method],
   );
-  const result = await startCheckout(payment.id, providerName, {
+  const checkout = await startCheckout(payment.id, candidates, {
     amount: b.amountMinor,
     platformFee: 0,
     currency: b.currency,
@@ -231,7 +205,51 @@ paymentsRouter.post('/wallet/topups', authenticate, requireUser('customer'), asy
     description: 'HANDIWORK-DECK wallet top-up',
     metadata: { paymentId: payment.id, purpose: 'wallet_topup' },
   });
-  res.status(201).json({ paymentId: payment.id, provider: providerName, checkoutUrl: result.checkoutUrl ?? null });
+  res.status(201).json({ paymentId: payment.id, provider: checkout.provider, checkoutUrl: checkout.checkoutUrl });
+});
+
+// ---------------------------------------------------------------- dedicated virtual accounts
+/**
+ * Section 11 bank transfer, per customer: a permanent account number (Paystack
+ * dedicated NUBAN / Flutterwave virtual account). Anything paid into it tops up
+ * the wallet, from which jobs are funded into escrow. Per-transaction transfer
+ * accounts come from the gateway checkout when `bank_transfer` is chosen.
+ */
+paymentsRouter.get('/wallet/virtual-account', authenticate, requireUser('customer'), async (req, res) => {
+  const { currency } = parse(z.object({ currency: z.string().length(3).toUpperCase().default('NGN') }), req.query);
+  const account = await one(
+    'SELECT provider, currency, account_number, account_name, bank_name, created_at FROM customer_virtual_accounts WHERE user_id = $1 AND currency = $2',
+    [currentUser(req).id, currency],
+  );
+  res.json({ account: account ?? null, available: !!(await dedicatedAccountGateway(currency)) });
+});
+
+paymentsRouter.post('/wallet/virtual-account', authenticate, requireUser('customer'), async (req, res) => {
+  const { currency, bvn } = parse(z.object({ currency: z.string().length(3).toUpperCase().default('NGN'), bvn: z.string().regex(/^\d{11}$/).optional() }), req.body ?? {});
+  const user = currentUser(req);
+  const existing = await one('SELECT * FROM customer_virtual_accounts WHERE user_id = $1 AND currency = $2', [user.id, currency]);
+  if (existing) {
+    res.json({ account: existing });
+    return;
+  }
+  const provider = await dedicatedAccountGateway(currency);
+  if (!provider) throw badRequest(`Dedicated transfer accounts aren't available in ${currency}`);
+  const gateway = getProvider(provider);
+  if (!gateway.createDedicatedAccount) throw badRequest(`${provider} can't issue dedicated accounts`);
+  const created = await gateway.createDedicatedAccount({
+    userId: user.id,
+    name: user.full_name,
+    email: user.email ?? undefined,
+    phone: user.phone_e164 ?? undefined,
+    currency,
+    bvn,
+  });
+  const account = await one(
+    `INSERT INTO customer_virtual_accounts (user_id, provider, currency, provider_ref, account_number, account_name, bank_name)
+     VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING provider, currency, account_number, account_name, bank_name, created_at`,
+    [user.id, provider, currency, created.providerRef, created.accountNumber, created.accountName ?? null, created.bankName ?? null],
+  );
+  res.status(201).json({ account });
 });
 
 /** Landing page for hosted checkout redirects; the app closes its WebView on this URL. */
@@ -239,12 +257,32 @@ paymentsRouter.get('/payments/return', (_req, res) => {
   res.type('html').send('<!doctype html><title>Payment</title><p>Payment submitted. You can return to the app.</p>');
 });
 
+/** A transfer into a customer's dedicated account: record it and credit their wallet. */
+async function creditVirtualAccount(db: pg.PoolClient, provider: ProviderName, event: NormalizedWebhookEvent): Promise<string> {
+  const va = await one('SELECT * FROM customer_virtual_accounts WHERE provider = $1 AND provider_ref = $2', [provider, event.accountRef ?? null], db);
+  if (!va || !event.amount || event.amount <= 0) {
+    logger.warn({ provider, event: event.id }, 'transfer to unknown virtual account');
+    return 'unknown_account';
+  }
+  const payment = await one(
+    `INSERT INTO payments (purpose, payer_id, provider, provider_ref, amount_minor, platform_fee_minor, currency, status, method, settlement, raw)
+     VALUES ('wallet_topup', $1, $2, $3, $4, 0, $5, 'succeeded', 'bank_transfer', 'platform_collect', $6) RETURNING id`,
+    [va.user_id, provider, event.providerRef ?? event.id, event.amount, va.currency, event.raw],
+    db,
+  );
+  await postToWallet(db, { userId: va.user_id, currency: va.currency, amountMinor: event.amount, kind: 'topup', paymentId: payment.id, memo: 'Bank transfer to your HANDIWORK account' });
+  return 'wallet_credited';
+}
+
+type EventResult = { outcome: string; fund?: FundOutcome };
+
 /** Applies a verified provider event. Idempotent on the provider's event id. */
 export async function handlePaymentEvent(provider: ProviderName, event: NormalizedWebhookEvent): Promise<string> {
   if (event.type === 'ignored') return 'ignored';
-  const { outcome, job } = await tx(async (db) => {
+  const result = await tx<EventResult>(async (db) => {
     const fresh = await one('INSERT INTO webhook_events (provider, event_id) VALUES ($1, $2) ON CONFLICT DO NOTHING RETURNING 1', [provider, event.id], db);
-    if (!fresh) return { outcome: 'duplicate', job: null };
+    if (!fresh) return { outcome: 'duplicate' };
+    if (event.type === 'virtual_account.credited') return { outcome: await creditVirtualAccount(db, provider, event) };
 
     const isUuid = event.reference && /^[0-9a-f-]{36}$/i.test(event.reference);
     const payment = await one(
@@ -254,52 +292,55 @@ export async function handlePaymentEvent(provider: ProviderName, event: Normaliz
     );
     if (!payment) {
       logger.warn({ provider, event: event.id }, 'webhook for unknown payment');
-      return { outcome: 'unknown_payment', job: null };
+      return { outcome: 'unknown_payment' };
     }
 
     switch (event.type) {
       case 'payment.succeeded': {
-        if (payment.status === 'succeeded') return { outcome: 'already_succeeded', job: null };
+        if (payment.status === 'succeeded') return { outcome: 'already_succeeded' };
         if (event.amount !== undefined && event.amount < Number(payment.amount_minor)) {
           logger.error({ paymentId: payment.id, got: event.amount, expected: payment.amount_minor }, 'underpayment');
           await db.query(`UPDATE payments SET status = 'failed', raw = $2 WHERE id = $1`, [payment.id, event.raw]);
-          return { outcome: 'amount_mismatch', job: null };
+          if (payment.purpose === 'promotion') await db.query(`UPDATE promotion_purchases SET status = 'failed' WHERE id = $1`, [payment.promotion_purchase_id]);
+          return { outcome: 'amount_mismatch' };
         }
         // Adopt the provider's final reference (e.g. Stripe session -> PaymentIntent id) for refunds.
-        await db.query(`UPDATE payments SET status = 'succeeded', raw = $2, provider_ref = COALESCE($3, provider_ref) WHERE id = $1`, [
+        const updated = await one(`UPDATE payments SET status = 'succeeded', raw = $2, provider_ref = COALESCE($3, provider_ref) WHERE id = $1 RETURNING *`, [
           payment.id,
           event.raw,
           event.providerRef ?? null,
-        ]);
+        ], db);
         if (payment.purpose === 'wallet_topup') {
           await postToWallet(db, { userId: payment.payer_id, currency: payment.currency, amountMinor: Number(payment.amount_minor), kind: 'topup', paymentId: payment.id, memo: `Top-up via ${provider}` });
-          return { outcome: 'wallet_credited', job: null };
+          return { outcome: 'wallet_credited' };
         }
-        if (payment.settlement === 'platform_collect') {
-          const share = Number(payment.amount_minor) - Number(payment.platform_fee_minor);
-          await postToWallet(db, { userId: payment.payee_id, currency: payment.currency, amountMinor: share, kind: 'job_earning', paymentId: payment.id, jobId: payment.job_id });
+        if (payment.purpose === 'promotion') {
+          await activatePromotion(db, payment.promotion_purchase_id);
+          return { outcome: 'promotion_activated' };
         }
-        return { outcome: 'paid', job: await markJobPaid(db, payment.job_id, payment.id) };
+        const fund = await fundEscrow(db, updated);
+        return { outcome: fund.outcome === 'captured' ? 'paid' : fund.outcome === 'held' ? 'escrow_held' : 'refunded_orphan', fund };
       }
       case 'payment.failed':
         if (payment.status === 'pending') {
           await db.query(`UPDATE payments SET status = 'failed', raw = $2 WHERE id = $1`, [payment.id, event.raw]);
+          if (payment.purpose === 'promotion') await db.query(`UPDATE promotion_purchases SET status = 'failed' WHERE id = $1`, [payment.promotion_purchase_id]);
         }
-        return { outcome: 'failed', job: null };
+        return { outcome: 'failed' };
       case 'refund.succeeded': {
         const refunded = event.amountIsCumulative
           ? (event.amount ?? Number(payment.amount_minor))
           : Number(payment.refunded_minor) + (event.amount ?? Number(payment.amount_minor));
         const status = refunded >= Number(payment.amount_minor) ? 'refunded' : 'partially_refunded';
         await db.query('UPDATE payments SET refunded_minor = $2, status = $3 WHERE id = $1', [payment.id, refunded, status]);
-        return { outcome: status, job: null };
+        return { outcome: status };
       }
       default:
-        return { outcome: 'ignored', job: null };
+        return { outcome: 'ignored' };
     }
   });
-  if (job) await afterTransition(job);
-  return outcome;
+  if (result.fund) await afterPaymentEvent(result.fund);
+  return result.outcome;
 }
 
 /**

@@ -30,3 +30,15 @@ export const laborQuote = (amountMinor: number, extra: Record<string, unknown> =
 export const fullScores = (n = 5) => ({ competence: n, punctuality: n, professionalism: n, courtesy: n, timeline: n, transparency: n, quality: n });
 
 export const bearer = (uid: string, phone?: string) => `Bearer dev:${uid}${phone ? `:${phone}` : ''}`;
+
+/**
+ * Suites written before Section 11 pay once the job is completed (paying then
+ * counts as confirming, so escrow is funded and captured in one step). The
+ * funding-before-start gate is exercised in escrow-ads.test.ts.
+ */
+export async function payOnCompletion() {
+  await pool.query(
+    `INSERT INTO platform_settings (key, value) VALUES ('escrow', '{"requireFundingBeforeStart": false, "autoReleaseHours": 48}')
+     ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value`,
+  );
+}

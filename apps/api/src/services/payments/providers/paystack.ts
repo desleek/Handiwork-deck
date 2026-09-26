@@ -57,6 +57,23 @@ export class PaystackProvider implements PaymentProvider {
     return { accountRef: data.subaccount_code, recipientRef: recipient.recipient_code };
   }
 
+  /** Paystack Dedicated Virtual Account: customer record + a dedicated NUBAN. */
+  async createDedicatedAccount(input: Parameters<NonNullable<PaymentProvider['createDedicatedAccount']>>[0]) {
+    const [first, ...rest] = input.name.split(/\s+/);
+    const customer = await this.call<{ customer_code: string }>('POST', '/customer', {
+      email: input.email,
+      first_name: first,
+      last_name: rest.join(' ') || first,
+      phone: input.phone,
+      metadata: { userId: input.userId },
+    });
+    const acct = await this.call<{ account_number: string; account_name: string; bank: { name: string } }>('POST', '/dedicated_account', {
+      customer: customer.customer_code,
+      preferred_bank: 'wema-bank',
+    });
+    return { providerRef: customer.customer_code, accountNumber: acct.account_number, accountName: acct.account_name, bankName: acct.bank?.name ?? null };
+  }
+
   async payout(input: Parameters<PaymentProvider['payout']>[0]) {
     if (!input.payee.recipientRef) throw new Error('Paystack payouts need a transfer recipient — re-run payout setup');
     const data = await this.call<{ transfer_code: string; status: string }>('POST', '/transfer', {
@@ -99,6 +116,10 @@ export class PaystackProvider implements PaymentProvider {
     };
     const { event, data } = payload;
     const id = `${event}:${data.id}`;
+    // Transfers into a customer's dedicated virtual account (per-customer bank transfer).
+    if (event === 'charge.success' && (data as any).channel === 'dedicated_nuban') {
+      return { id, type: 'virtual_account.credited', accountRef: (data as any).customer?.customer_code, amount: data.amount, currency: data.currency, raw: payload };
+    }
     switch (event) {
       case 'charge.success':
         return { id, type: 'payment.succeeded', providerRef: data.reference, reference: data.reference, amount: data.amount, currency: data.currency, raw: payload };

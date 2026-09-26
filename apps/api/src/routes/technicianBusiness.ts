@@ -1,4 +1,4 @@
-import { multiplierFor, nextTierGuidance, type RateTier } from '@handiwork/shared';
+import { multiplierFor, nextTierGuidance, PAYMENT_METHODS, type RateTier } from '@handiwork/shared';
 import { Router } from 'express';
 import { z } from 'zod';
 import { one, query, tx } from '../db/pool';
@@ -6,7 +6,10 @@ import { badRequest, conflict, HttpError } from '../lib/errors';
 import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 import { jobs as scheduler } from '../queues/index';
+import type { GatewayMethod } from '../services/payments/index';
+import { candidatesOrReject, startCheckout } from '../services/payments/checkout';
 import { nextStandardBatch, payoutFee } from '../services/payouts';
+import { activatePromotion } from '../services/promotions';
 import { nextRecalculationAt } from '../services/rateAdjustment';
 import { getSetting, markupCapFor } from '../services/settings';
 import { postToWallet } from '../services/wallet';
@@ -57,24 +60,32 @@ async function performanceSummary(techId: string) {
 technicianBusinessRouter.get('/technicians/me/earnings', async (req, res) => {
   const techId = currentUser(req).id;
   const [byCurrency, pending, wallet, payouts, promotions] = await Promise.all([
+    // Section 11: earnings come from the itemized escrow captures.
     query(
-      `SELECT p.currency,
+      `SELECT h.currency,
               count(*)::int AS jobs_paid,
-              sum(p.amount_minor)::bigint AS gross_minor,
-              sum(p.platform_fee_minor)::bigint AS commission_minor,
-              sum(p.amount_minor - p.platform_fee_minor)::bigint AS net_minor,
-              sum(q.labor_minor)::bigint AS labor_minor,
-              sum(q.parts_base_minor)::bigint AS parts_reimbursed_minor,
-              sum(q.markup_minor)::bigint AS markup_minor,
-              sum(CASE WHEN p.updated_at >= date_trunc('month', now()) THEN p.amount_minor - p.platform_fee_minor ELSE 0 END)::bigint AS net_this_month_minor
-         FROM payments p JOIN quotes q ON q.job_id = p.job_id AND q.status = 'accepted'
-        WHERE p.payee_id = $1 AND p.purpose = 'job' AND p.status IN ('succeeded', 'partially_refunded')
-        GROUP BY p.currency ORDER BY p.currency`,
+              sum(h.captured_minor)::bigint AS gross_minor,
+              sum(h.commission_minor)::bigint AS commission_minor,
+              sum(h.technician_payout_minor)::bigint AS net_minor,
+              sum(h.labor_minor)::bigint AS labor_minor,
+              sum(h.parts_base_minor)::bigint AS parts_reimbursed_minor,
+              sum(h.markup_minor)::bigint AS markup_minor,
+              sum(CASE WHEN h.captured_at >= date_trunc('month', now()) THEN h.technician_payout_minor ELSE 0 END)::bigint AS net_this_month_minor
+         FROM escrow_holds h JOIN jobs j ON j.id = h.job_id
+        WHERE j.technician_id = $1 AND h.status = 'captured'
+        GROUP BY h.currency ORDER BY h.currency`,
       [techId],
     ),
+    // Pending: secured in escrow awaiting release, plus accepted work not yet funded.
     query(
-      `SELECT currency, count(*)::int AS jobs, sum(budget_minor)::bigint AS amount_minor
-         FROM jobs WHERE technician_id = $1 AND status IN ('assigned', 'en_route', 'in_progress', 'completed') GROUP BY currency`,
+      `SELECT j.currency, count(*)::int AS jobs,
+              sum(coalesce(h.held_minor, q.amount_minor))::bigint AS amount_minor,
+              sum(CASE WHEN j.escrow_status = 'held' THEN h.held_minor ELSE 0 END)::bigint AS in_escrow_minor
+         FROM jobs j
+         LEFT JOIN escrow_holds h ON h.job_id = j.id AND h.status = 'held'
+         LEFT JOIN quotes q ON q.job_id = j.id AND q.status = 'accepted'
+        WHERE j.technician_id = $1 AND j.status IN ('assigned', 'en_route', 'in_progress', 'completed', 'disputed')
+        GROUP BY j.currency`,
       [techId],
     ),
     query('SELECT currency, balance_minor FROM wallets WHERE user_id = $1 ORDER BY currency', [techId]),
@@ -146,12 +157,20 @@ const PurchaseBody = z.object({
   currency: z.string().length(3).toUpperCase().default('NGN'),
   /** Boosts can target one of the technician's categories; omit for all of them. */
   categoryId: z.number().int().positive().optional(),
+  /** Section 11: promotions go through the same payment layer as jobs — wallet or any gateway channel. */
+  method: z.enum(PAYMENT_METHODS).default('wallet'),
+  provider: z.enum(['stripe', 'paystack', 'flutterwave', 'mock']).optional(),
 });
 
-/** Buy a visibility boost or priority job alerts, paid from the wallet. Buying again extends the period. */
+/**
+ * Buy a visibility boost or priority job alerts. Wallet purchases activate
+ * immediately; card / bank transfer / USSD purchases activate when the gateway
+ * confirms payment. Buying again extends the period.
+ */
 technicianBusinessRouter.post('/technicians/me/promotions', async (req, res) => {
   const b = parse(PurchaseBody, req.body);
-  const techId = currentUser(req).id;
+  const tech = currentUser(req);
+  const techId = tech.id;
   const { products } = await getSetting('promotions');
   const product = products[b.product];
   if (!product) throw badRequest('Unknown product');
@@ -163,41 +182,51 @@ technicianBusinessRouter.post('/technicians/me/promotions', async (req, res) => 
     const svc = await one('SELECT 1 FROM technician_services WHERE technician_id = $1 AND category_id = $2', [techId, b.categoryId]);
     if (!svc) throw badRequest('You can only boost a service you offer');
   }
+  const categoryId = product.kind === 'boost' ? (b.categoryId ?? null) : null;
 
-  const purchase = await tx(async (db) => {
-    const p = await one(
-      `INSERT INTO promotion_purchases (technician_id, product, category_id, price_minor, currency) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      [techId, b.product, product.kind === 'boost' ? (b.categoryId ?? null) : null, price, b.currency],
-      db,
-    );
-    if (price > 0) {
-      await postToWallet(db, { userId: techId, currency: b.currency, amountMinor: -price, kind: 'promotion', promotionId: p.id, memo: product.label });
-    }
-    if (product.kind === 'boost') {
-      const boost = await one(
-        `INSERT INTO technician_boosts (technician_id, category_id, priority, starts_at, ends_at, source)
-         SELECT $1, $2, $3, s, s + make_interval(days => $4), 'purchase'
-           FROM (SELECT greatest(now(), coalesce(max(ends_at), now())) AS s FROM technician_boosts
-                  WHERE technician_id = $1 AND source = 'purchase' AND category_id IS NOT DISTINCT FROM $2) x
-         RETURNING id, starts_at, ends_at`,
-        [techId, b.categoryId ?? null, product.priority ?? 10, product.days],
+  if (b.method === 'wallet' || price === 0) {
+    const purchase = await tx(async (db) => {
+      const p = await one(
+        `INSERT INTO promotion_purchases (technician_id, product, category_id, price_minor, currency) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [techId, b.product, categoryId, price, b.currency],
         db,
       );
-      await db.query('UPDATE promotion_purchases SET boost_id = $2 WHERE id = $1', [p.id, boost.id]);
-      return { id: p.id, kind: 'boost', startsAt: boost.starts_at, endsAt: boost.ends_at };
-    }
-    const sub = await one(
-      `INSERT INTO technician_alert_subscriptions (technician_id, radius_factor, starts_at, ends_at)
-       SELECT $1, $2, s, s + make_interval(days => $3)
-         FROM (SELECT greatest(now(), coalesce(max(ends_at), now())) AS s FROM technician_alert_subscriptions WHERE technician_id = $1) x
-       RETURNING id, starts_at, ends_at`,
-      [techId, product.radiusFactor ?? 2, product.days],
+      if (price > 0) {
+        await postToWallet(db, { userId: techId, currency: b.currency, amountMinor: -price, kind: 'promotion', promotionId: p.id, memo: product.label });
+      }
+      return activatePromotion(db, p.id);
+    });
+    res.status(201).json({ purchase });
+    return;
+  }
+
+  const method = b.method as GatewayMethod;
+  const candidates = await candidatesOrReject(b.currency, method, b.provider);
+  const { purchaseId, paymentId } = await tx(async (db) => {
+    const p = await one(
+      `INSERT INTO promotion_purchases (technician_id, product, category_id, price_minor, currency, status) VALUES ($1, $2, $3, $4, $5, 'pending') RETURNING id`,
+      [techId, b.product, categoryId, price, b.currency],
       db,
     );
-    await db.query('UPDATE promotion_purchases SET alert_subscription_id = $2 WHERE id = $1', [p.id, sub.id]);
-    return { id: p.id, kind: 'alerts', startsAt: sub.starts_at, endsAt: sub.ends_at };
+    const pay = await one(
+      `INSERT INTO payments (purpose, payer_id, promotion_purchase_id, provider, provider_ref, amount_minor, platform_fee_minor, currency, method, settlement)
+       VALUES ('promotion', $1, $2, $3, gen_random_uuid()::text, $4, $4, $5, $6, 'platform_collect') RETURNING id`,
+      [techId, p.id, candidates[0], price, b.currency, method],
+      db,
+    );
+    await db.query('UPDATE promotion_purchases SET payment_id = $2 WHERE id = $1', [p.id, pay.id]);
+    return { purchaseId: p.id, paymentId: pay.id };
   });
-  res.status(201).json({ purchase });
+  const checkout = await startCheckout(paymentId, candidates, {
+    amount: price,
+    platformFee: price,
+    currency: b.currency,
+    method,
+    customer: tech,
+    description: `HANDIWORK-DECK ${product.label}`,
+    metadata: { paymentId, purpose: 'promotion', purchaseId },
+  });
+  res.status(202).json({ purchase: { id: purchaseId, kind: product.kind, status: 'pending' }, paymentId, provider: checkout.provider, checkoutUrl: checkout.checkoutUrl });
 });
 
 // ---------------------------------------------------------------- payouts

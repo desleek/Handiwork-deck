@@ -261,7 +261,7 @@ const PayoutBody = z.object({
 techniciansRouter.post('/technicians/me/payout-account', ...techOnly, async (req, res) => {
   const b = parse(PayoutBody, req.body);
   const user = currentUser(req);
-  const providerName = providerForCurrency(b.currency);
+  const providerName = await providerForCurrency(b.currency);
   if ((providerName === 'paystack' || providerName === 'flutterwave') && !b.bank) {
     throw badRequest(`Bank details are required for ${providerName} payouts`);
   }

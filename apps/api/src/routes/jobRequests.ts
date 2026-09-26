@@ -8,6 +8,7 @@ import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 import { jobs as scheduler, minutes } from '../queues/index';
 import { audit } from '../services/audit';
+import { releaseEscrowOnExit } from '../services/escrow';
 import { invoiceFor } from '../services/jobs/invoice';
 import { transitionJob } from '../services/jobs/lifecycle';
 import { findMatchingTechnicians } from '../services/matching';
@@ -90,6 +91,8 @@ jobRequestsRouter.post('/jobs/:id/instant/decline', ...techOnly, async (req, res
     await audit(jobId, tech.id, 'instant.declined', { reason: reason ?? null }, db);
     return job;
   });
+  // Section 11: anything the customer paid into escrow for this booking goes back.
+  await releaseEscrowOnExit(job);
   const full = await one('SELECT * FROM jobs WHERE id = $1', [job.id]);
   await openToMarketplace({ ...full, declined_by: tech.id }, `${tech.full_name.split(' ')[0]} couldn't take your instant booking, so we've shared it with other nearby technicians.`);
   res.json({ job: full });

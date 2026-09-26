@@ -6,7 +6,7 @@ import { InMemoryScheduler, jobs } from '../src/queues/index';
 import { LoggingWhatsAppClient, setWhatsAppClient } from '../src/services/messaging/whatsapp';
 import { pushToUser } from '../src/services/notifications/push';
 import { setStorageDriver } from '../src/services/storage/index';
-import { bearer, categoryId, dbAvailable, resetDb } from './helpers';
+import { bearer, categoryId, dbAvailable, payOnCompletion, resetDb } from './helpers';
 
 const hasDb = await dbAvailable();
 const app = createApp();
@@ -46,6 +46,7 @@ const part = (d: string, n: number) => ({ kind: 'material', description: d, quan
 describe.skipIf(!hasDb)('Sections 8, 9, 10: masked communication, live tracking, seller registry', () => {
   beforeAll(async () => {
     await resetDb();
+    await payOnCompletion();
     plumbing = await categoryId('plumbing');
     id.admin = await register('admin', '+2348300000001', { role: 'customer', fullName: 'Ops Admin', customerType: 'office' });
     await pool.query(`UPDATE users SET role = 'admin', customer_type = NULL WHERE id = $1`, [id.admin]);

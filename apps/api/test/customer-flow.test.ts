@@ -7,7 +7,7 @@ import { InMemoryScheduler, jobs } from '../src/queues/index';
 import { relayInbound } from '../src/services/messaging/relay';
 import { LoggingWhatsAppClient, setWhatsAppClient } from '../src/services/messaging/whatsapp';
 import { MockProvider } from '../src/services/payments/providers/mock';
-import { bearer, categoryId, dbAvailable, fullScores, laborQuote, resetDb } from './helpers';
+import { bearer, categoryId, dbAvailable, fullScores, laborQuote, payOnCompletion, resetDb } from './helpers';
 
 const hasDb = await dbAvailable();
 const app = createApp();
@@ -63,6 +63,7 @@ async function completeJobWith(techUid: string, customerUid: string, amount = 10
 describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
   beforeAll(async () => {
     await resetDb();
+    await payOnCompletion();
     plumbing = await categoryId('plumbing');
     otherHousehold = await categoryId('other-household');
     id.admin = await register(U.admin, { role: 'customer', fullName: 'Ops Admin', customerType: 'office' });
@@ -426,9 +427,9 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       id.unpaidJob = jobId;
     });
 
-    it('collects on the platform and credits the technician wallet when they have no payout account', async () => {
+    it('funds escrow over USSD; paying a completed job releases it to the technician wallet', async () => {
       const pay = await request(app).post(`/v1/jobs/${id.unpaidJob}/payments`).set(as(U.cust2.uid)).send({ method: 'ussd' });
-      expect(pay.body).toMatchObject({ settlement: 'platform_collect', method: 'ussd' });
+      expect(pay.body).toMatchObject({ settlement: 'escrow', method: 'ussd' });
       expect((await webhook({ id: 'evt_pc', type: 'payment.succeeded', reference: pay.body.paymentId, amount: 1_000_000 })).body.outcome).toBe('paid');
       const tw = await request(app).get('/v1/wallet').set(as(U.bola.uid));
       expect(tw.body.balances).toEqual([{ currency: 'NGN', balance_minor: 820_000 }]);

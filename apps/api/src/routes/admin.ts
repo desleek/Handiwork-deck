@@ -7,6 +7,7 @@ import { postToWallet } from '../services/wallet';
 import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 import { jobs } from '../queues/index';
+import { settleEscrow } from '../services/escrow';
 import { getProvider, type ProviderName } from '../services/payments/index';
 
 export const adminRouter = Router();
@@ -77,28 +78,14 @@ adminRouter.post('/admin/escalations/:id/resolve', async (req, res) => {
   res.json({ escalation: row });
 });
 
-adminRouter.get('/admin/ads', async (req, res) => {
-  const { status } = parse(z.object({ status: z.string().default('pending_review') }), req.query);
-  const ads = await query('SELECT * FROM ad_campaigns WHERE status = $1::ad_status ORDER BY created_at LIMIT 200', [status]);
-  res.json({ ads });
-});
-
-adminRouter.post('/admin/ads/:id/review', async (req, res) => {
-  const id = parse(z.uuid(), req.params.id);
-  const { decision } = parse(z.object({ decision: z.enum(['approve', 'reject']) }), req.body);
-  const ad = await one(
-    `UPDATE ad_campaigns SET status = $2 WHERE id = $1 AND status = 'pending_review' RETURNING *`,
-    [id, decision === 'approve' ? 'active' : 'rejected'],
-  );
-  if (!ad) throw conflict('Campaign is not awaiting review');
-  res.json({ ad });
-});
-
 /**
  * Refunds a captured payment.
- *  - wallet settlement: reversed internally (technician's share and our fee back to the customer's wallet).
+ *  - escrow (Section 11): only after capture — money still held is returned via
+ *    POST /admin/jobs/:id/escrow/settle. The technician's released share is
+ *    clawed back pro rata, then the customer is refunded on the original channel.
+ *  - wallet-funded payments are reversed internally, back to the customer's wallet.
  *  - platform_collect: the technician's wallet credit is clawed back first, then the gateway refunds.
- *  - split: the gateway reverses the split (Stripe reverse_transfer / provider refund).
+ *  - split (legacy): the gateway reverses the split.
  */
 adminRouter.post('/admin/payments/:id/refund', async (req, res) => {
   const id = parse(z.uuid(), req.params.id);
@@ -110,7 +97,14 @@ adminRouter.post('/admin/payments/:id/refund', async (req, res) => {
   const amount = amountMinor ?? refundable;
   if (amount > refundable) throw conflict(`At most ${refundable} can be refunded`);
   const gross = Number(payment.amount_minor);
-  const payeeShare = Math.round(((gross - Number(payment.platform_fee_minor)) * amount) / gross);
+  let payeeShare = Math.round(((gross - Number(payment.platform_fee_minor)) * amount) / gross);
+  if (payment.settlement === 'escrow') {
+    const hold = await one('SELECT * FROM escrow_holds WHERE payment_id = $1', [id]);
+    if (hold?.status === 'held') throw conflict('These funds are still in escrow; settle the escrow instead');
+    const captured = Number(hold?.captured_minor ?? 0);
+    payeeShare = captured > 0 ? Math.round((Number(hold.technician_payout_minor) * Math.min(amount, captured)) / captured) : 0;
+  }
+  const toWallet = payment.provider === 'wallet';
   const refundKey = `${payment.id}:${Number(payment.refunded_minor) + amount}`;
 
   if (payment.purpose === 'job' && payment.settlement !== 'split') {
@@ -119,13 +113,13 @@ adminRouter.post('/admin/payments/:id/refund', async (req, res) => {
       if (payeeShare > 0) {
         await postToWallet(db, { userId: payment.payee_id, currency: payment.currency, amountMinor: -payeeShare, kind: 'refund', jobId: payment.job_id, memo: `Refund ${refundKey}` });
       }
-      if (payment.settlement === 'wallet') {
+      if (toWallet) {
         await postToWallet(db, { userId: payment.payer_id, currency: payment.currency, amountMinor: amount, kind: 'refund', jobId: payment.job_id, memo: `Refund ${refundKey}` });
         const refunded = Number(payment.refunded_minor) + amount;
         await db.query('UPDATE payments SET refunded_minor = $2, status = $3 WHERE id = $1', [id, refunded, refunded >= gross ? 'refunded' : 'partially_refunded']);
       }
     });
-    if (payment.settlement === 'wallet') {
+    if (toWallet) {
       res.status(200).json({ refundRef: `wallet:${refundKey}`, status: 'refunded_to_wallet' });
       return;
     }
@@ -137,4 +131,29 @@ adminRouter.post('/admin/payments/:id/refund', async (req, res) => {
     currency: payment.currency,
   });
   res.status(202).json({ refundRef: result.refundRef });
+});
+
+// ---------------------------------------------------------------- escrow (Section 11)
+adminRouter.get('/admin/escrow', async (req, res) => {
+  const { status } = parse(z.object({ status: z.enum(['held', 'captured', 'refunded']).default('held') }), req.query);
+  const holds = await query(
+    `SELECT h.*, j.ref, j.title, j.status AS job_status, p.provider, p.method
+       FROM escrow_holds h JOIN jobs j ON j.id = h.job_id JOIN payments p ON p.id = h.payment_id
+      WHERE h.status = $1 ORDER BY h.funded_at DESC LIMIT 200`,
+    [status],
+  );
+  const totals = await query(
+    `SELECT currency, status, count(*)::int AS n, sum(held_minor)::bigint AS held_minor, sum(coalesce(commission_minor, 0))::bigint AS commission_minor
+       FROM escrow_holds GROUP BY currency, status ORDER BY currency, status`,
+  );
+  res.json({ holds, totals });
+});
+
+/** Dispute resolution: capture part (or all) of the escrow for the technician and refund the rest; 0 refunds everything and cancels. */
+adminRouter.post('/admin/jobs/:id/escrow/settle', async (req, res) => {
+  const jobId = parse(z.uuid(), req.params.id);
+  const { captureMinor } = parse(z.object({ captureMinor: z.number().int().min(0) }), req.body);
+  const job = await settleEscrow(jobId, currentUser(req).id, captureMinor);
+  const hold = await one('SELECT * FROM escrow_holds WHERE job_id = $1', [jobId]);
+  res.json({ job, hold });
 });

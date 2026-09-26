@@ -7,7 +7,7 @@ import { InMemoryScheduler, jobs } from '../src/queues/index';
 import { relayInbound } from '../src/services/messaging/relay';
 import { LoggingWhatsAppClient, setWhatsAppClient } from '../src/services/messaging/whatsapp';
 import { MockProvider } from '../src/services/payments/providers/mock';
-import { bearer, dbAvailable, fullScores, laborQuote, resetDb } from './helpers';
+import { bearer, dbAvailable, fullScores, laborQuote, payOnCompletion, resetDb } from './helpers';
 
 const hasDb = await dbAvailable();
 if (!hasDb) console.warn('Skipping integration tests: PostgreSQL not reachable (set TEST_DATABASE_URL)');
@@ -36,6 +36,7 @@ describe.skipIf(!hasDb)('marketplace flow', () => {
 
   beforeAll(async () => {
     await resetDb();
+    await payOnCompletion();
     ids.customer = (await register(CUSTOMER, { role: 'customer', fullName: 'Ada Obi', customerType: 'homeowner', email: 'ada@example.com' })).id;
     ids.tech = (await register(TECH, { role: 'technician', fullName: 'Tunde Bello' })).id;
     ids.techFar = (await register(TECH_FAR, { role: 'technician', fullName: 'Kemi Far' })).id;
@@ -180,13 +181,13 @@ describe.skipIf(!hasDb)('marketplace flow', () => {
     expect(await processEscalation({ kind: 'no_show', jobId: ids.job! })).toBe('skipped');
   });
 
-  it('takes a split payment and marks the job paid from the provider webhook', async () => {
+  it('funds escrow through the gateway and releases it itemized when the completed job is paid', async () => {
     const onboard = await request(app).post('/v1/technicians/me/payout-account').set('Authorization', bearer(TECH.uid)).send({ currency: 'NGN', country: 'NG' });
     expect(onboard.status).toBe(201);
 
     const pay = await request(app).post(`/v1/jobs/${ids.job}/payments`).set('Authorization', bearer(CUSTOMER.uid));
     expect(pay.status).toBe(201);
-    expect(pay.body).toMatchObject({ provider: 'mock', settlement: 'split', amountMinor: 1_500_000, platformFeeMinor: 270_000, currency: 'NGN' });
+    expect(pay.body).toMatchObject({ provider: 'mock', settlement: 'escrow', amountMinor: 1_500_000, platformFeeMinor: 270_000, currency: 'NGN' });
 
     const body = JSON.stringify({ id: 'evt_1', type: 'payment.succeeded', reference: pay.body.paymentId, amount: 1_500_000 });
     const bad = await request(app).post('/v1/webhooks/payments/mock').set('x-mock-signature', 'forged').set('Content-Type', 'application/json').send(body);
@@ -210,25 +211,5 @@ describe.skipIf(!hasDb)('marketplace flow', () => {
     expect(profile.body.technician).toMatchObject({ rating_avg: 5, rating_count: 1 });
     expect(profile.body.technician.reviews[0].tags).toContain('Punctuality 5★');
     expect(profile.body.technician).not.toHaveProperty('phone_e164');
-  });
-
-  it('runs advertiser campaigns through admin review into placements', async () => {
-    const ADV = { uid: 'adv-1' };
-    await register(ADV, { role: 'advertiser', fullName: 'Parts Hub Ltd', companyName: 'Parts Hub' });
-    const created = await request(app)
-      .post('/v1/ads')
-      .set('Authorization', bearer(ADV.uid))
-      .send({ title: 'Genuine PVC fittings', clickUrl: 'https://partshub.example/pvc', targetCategoryIds: [Number(ids.plumbing)], budgetMinor: 0, currency: 'NGN' });
-    expect(created.status).toBe(201);
-    const adId = created.body.ad.id;
-
-    expect((await request(app).post(`/v1/ads/${adId}/status`).set('Authorization', bearer(ADV.uid)).send({ status: 'active' })).status).toBe(409);
-    expect((await request(app).post(`/v1/ads/${adId}/status`).set('Authorization', bearer(ADV.uid)).send({ status: 'pending_review' })).status).toBe(200);
-    expect((await request(app).post(`/v1/admin/ads/${adId}/review`).set('Authorization', bearer(ADMIN.uid)).send({ decision: 'approve' })).status).toBe(200);
-
-    const placements = await request(app).get(`/v1/ads/placements?categoryId=${ids.plumbing}`).set('Authorization', bearer(CUSTOMER.uid));
-    expect(placements.body.ads.map((a: { id: string }) => a.id)).toEqual([adId]);
-    const other = await request(app).get('/v1/ads/placements?categoryId=999').set('Authorization', bearer(CUSTOMER.uid));
-    expect(other.body.ads).toHaveLength(0);
   });
 });
