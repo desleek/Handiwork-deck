@@ -9,7 +9,6 @@ import { jobs as scheduler } from '../queues/index';
 import { audit } from '../services/audit';
 import { afterTransition, type JobRecord, transitionJob } from '../services/jobs/lifecycle';
 import { addAdjustment, assignQuote, type QuoteLineInput, refreshQuoteTotals, writeQuoteItems } from '../services/jobs/quotes';
-import { waDeepLink } from '../services/messaging/whatsapp';
 import { effectiveRateBps, recomputeTechnicianRating } from '../services/ratings';
 import { getSetting } from '../services/settings';
 
@@ -214,7 +213,7 @@ quotesRouter.post('/jobs/:id/quotes/:quoteId/accept', authenticate, requireUser(
     return assignQuote(db, jobId, quoteId, { id: customer.id, role: 'customer' }, `approved quote ${quoteId} (rev ${q.revision})`);
   });
   await afterTransition(job);
-  res.json({ job, whatsappLink: waDeepLink(job.ref) ?? null });
+  res.json({ job });
 });
 
 const CounterBody = z.object({
@@ -257,7 +256,12 @@ quotesRouter.post('/jobs/:id/quotes/:quoteId/counter', authenticate, requireUser
     return { counter, q };
   });
   const label = { labor_only: 'a labor-only request', labor_negotiation: 'a labor cost proposal' }[b.kind];
-  await notify(q.technician_id, 'Counter-offer received', `The customer sent ${label} on "${q.job_title}"`, jobId, 'quote.countered');
+  await scheduler().notify(q.technician_id, {
+    title: 'Customer response to your quote',
+    body: `The customer sent ${label} on "${q.job_title}"`,
+    data: { jobId, jobRef: q.job_ref, type: 'quote.countered' },
+    whatsapp: true,
+  });
   res.status(201).json({ counter });
 });
 
@@ -359,7 +363,7 @@ quotesRouter.post('/jobs/:id/quotes/:quoteId/counters/:counterId/respond', authe
   if (outcome.job) {
     await afterTransition(outcome.job);
     await notify(outcome.other, 'Offer accepted', `${who} accepted — the job "${outcome.title}" is booked at the agreed price.`, jobId, 'quote.counter_accepted');
-    res.json({ job: outcome.job, whatsappLink: waDeepLink(outcome.job.ref) ?? null });
+    res.json({ job: outcome.job });
     return;
   }
   const text =

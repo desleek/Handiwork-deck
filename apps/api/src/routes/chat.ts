@@ -2,17 +2,20 @@ import { maskContactInfo } from '@handiwork/shared';
 import { Router } from 'express';
 import { z } from 'zod';
 import { one, pool, query } from '../db/pool';
-import { badRequest, conflict, forbidden } from '../lib/errors';
+import { badRequest, conflict, forbidden, HttpError } from '../lib/errors';
 import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 import { jobs as scheduler } from '../queues/index';
+import { audit } from '../services/audit';
 import { ensureConversation, isApproved } from '../services/messaging/conversations';
 import { loadJobFor } from './jobs';
 
 /**
- * Masked in-app chat. One thread per (job, technician); the same thread also
- * receives messages relayed from the central WhatsApp number. Until the customer
- * approves that technician's quote, phone numbers / emails / chat links are hidden.
+ * Section 8: masked in-app chat is the primary channel — one thread per
+ * (job, technician), fully logged for dispute evidence. Technicians are also
+ * notified via the central WhatsApp number and their WhatsApp replies land in the
+ * same thread. Until the job is approved, phone numbers / emails / chat links are
+ * hidden, and real contact details are only released afterwards (GET /jobs/:id/contact).
  */
 export const chatRouter = Router();
 
@@ -83,16 +86,36 @@ chatRouter.post('/jobs/:id/messages', authenticate, requireUser('customer', 'tec
   if (!convo?.is_open) throw conflict('This conversation is closed');
   const { text, masked } = isApproved(job, technicianId) ? { text: b.body, masked: false } : maskContactInfo(b.body);
   const message = await one(
-    `INSERT INTO messages (conversation_id, sender_id, body, channel, masked) VALUES ($1, $2, $3, 'app', $4)
+    `INSERT INTO messages (conversation_id, sender_id, body, original_body, channel, masked) VALUES ($1, $2, $3, $4, 'app', $5)
      RETURNING id, sender_id, body, channel, masked, created_at`,
-    [convo.id, user.id, text, masked],
+    [convo.id, user.id, text, b.body, masked],
   );
   await query('UPDATE conversations SET last_message_at = now() WHERE id = $1', [convo.id]);
-  const recipient = user.id === technicianId ? job.customer_id : technicianId;
-  await scheduler().notify(recipient, {
-    title: `Message about #${job.ref}`,
-    body: text.slice(0, 140),
-    data: { jobId, type: 'chat.message', technicianId },
+  const toTechnician = user.id !== technicianId;
+  await scheduler().notify(toTechnician ? technicianId : job.customer_id, {
+    title: toTechnician ? `Customer message` : `Message about #${job.ref}`,
+    body: text.slice(0, 500),
+    data: { jobId, jobRef: job.ref, type: 'chat.message', technicianId },
+    // Technicians also get it on WhatsApp from the platform number (never the customer's).
+    whatsapp: toTechnician,
   });
   res.status(201).json({ message: { ...message, mine: true } });
+});
+
+/**
+ * Real contact details, released to both parties only once the job is approved
+ * (a quote accepted). Every release is written to the job's audit trail.
+ */
+chatRouter.get('/jobs/:id/contact', authenticate, requireUser('customer', 'technician'), async (req, res) => {
+  const jobId = parse(z.uuid(), req.params.id);
+  const user = currentUser(req);
+  const job = await loadJobFor(jobId, user.id, user.role);
+  const isParty = job.customer_id === user.id || job.technician_id === user.id;
+  if (!isParty || !job.technician_id || !isApproved(job, job.technician_id) || job.status === 'cancelled') {
+    throw new HttpError(403, 'Contact details are shared once the job is approved', 'contact_locked');
+  }
+  const otherId = user.id === job.customer_id ? job.technician_id : job.customer_id;
+  const other = await one('SELECT full_name, phone_e164 FROM users WHERE id = $1', [otherId]);
+  await audit(jobId, user.id, 'contact.released', { to: user.role });
+  res.json({ contact: { name: other.full_name, phone: other.phone_e164 } });
 });

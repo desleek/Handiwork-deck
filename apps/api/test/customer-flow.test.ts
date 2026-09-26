@@ -183,6 +183,9 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
     });
 
     it('shows live positions only for technicians online recently', async () => {
+      // Location is only shared after the in-app disclosure (Section 9).
+      expect((await request(app).put('/v1/technicians/me/presence').set(as(U.alice.uid)).send({ online: true, lat: 6.6, lng: 3.35 })).body.error.code).toBe('disclosure_required');
+      await request(app).post('/v1/me/location-disclosure').set(as(U.alice.uid));
       await request(app).put('/v1/technicians/me/presence').set(as(U.alice.uid)).send({ online: true, lat: 6.60123, lng: 3.35456 });
       const r = await request(app).get(`/v1/discover?categoryId=${plumbing}`).set(as(U.cust.uid));
       const all = [...r.body.boosted, ...r.body.organic];
@@ -349,10 +352,11 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       // Alice wasn't hired: her thread is closed.
       expect((await request(app).post(`/v1/jobs/${jobId}/messages`).set(as(U.cust2.uid)).send({ technicianId: id.alice, body: 'sorry' })).status).toBe(409);
 
-      // WhatsApp relay routes to the hired technician's thread.
+      // The hired technician's WhatsApp reply lands in their thread.
       const ref = (await request(app).get(`/v1/jobs/${jobId}`).set(as(U.cust2.uid))).body.job.ref;
-      expect((await relayInbound({ waMessageId: 'w1', fromE164: U.cust2.phone, text: `#${ref} gate code is 1234`, timestamp: new Date() })).status).toBe('relayed');
-      expect(wa.sent.at(-1)!.to).toBe(U.bola.phone);
+      expect((await relayInbound({ waMessageId: 'w1', fromE164: U.bola.phone, text: `#${ref} I'll call on 0803 555 1234`, timestamp: new Date() })).status).toBe('relayed');
+      const bolaThread = await request(app).get(`/v1/jobs/${jobId}/messages?technicianId=${id.bola}`).set(as(U.cust2.uid));
+      expect(bolaThread.body.messages.at(-1)).toMatchObject({ channel: 'whatsapp', masked: false, body: "I'll call on 0803 555 1234" });
       await request(app).post(`/v1/jobs/${jobId}/status`).set(as(U.cust2.uid)).send({ status: 'cancelled' });
     });
   });

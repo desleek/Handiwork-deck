@@ -79,9 +79,10 @@ describe.skipIf(!hasDb)('Sections 6, 7, 7a: quote responses, dual ratings, labor
       await request(app).put('/v1/technicians/me').set(as(uid)).send({ baseLat: 6.6, baseLng: 3.35, serviceRadiusKm: 20 });
       await request(app).post(`/v1/admin/technicians/${id[uid]}/verification`).set(as('admin')).send({ status: 'verified' });
     }
-    // Verified-seller registry (Section 10 placeholder).
-    id.seller = (await request(app).post('/v1/admin/sellers').set(as('admin')).send({ name: 'Alaba Pumps Ltd', city: 'Lagos', isVerified: true })).body.seller.id;
-    id.shady = (await request(app).post('/v1/admin/sellers').set(as('admin')).send({ name: 'Unverified Parts' })).body.seller.id;
+    // Seller registry: one verified seller, one flagged as fraudulent (Section 10).
+    id.seller = (await request(app).post('/v1/admin/sellers').set(as('admin')).send({ name: 'Alaba Pumps Ltd', city: 'Lagos' })).body.seller.id;
+    id.shady = (await request(app).post('/v1/admin/sellers').set(as('admin')).send({ name: 'Shady Parts' })).body.seller.id;
+    await request(app).post(`/v1/admin/sellers/${id.shady}/status`).set(as('admin')).send({ status: 'flagged', reason: 'Forged invoices' });
   });
   beforeEach(() => {
     scheduler.reset();
@@ -143,7 +144,7 @@ describe.skipIf(!hasDb)('Sections 6, 7, 7a: quote responses, dual ratings, labor
     let pumpId: string;
     let evidence: string;
 
-    it('rejects evidence from sellers outside the verified registry at upload', async () => {
+    it('rejects evidence from flagged sellers (or with no seller) at upload', async () => {
       const bad = await request(app).post('/v1/uploads').set(as('cust')).send({ kind: 'price_evidence', contentType: 'image/jpeg', sellerId: id.shady });
       expect(bad.status).toBe(422);
       expect(bad.body.error.code).toBe('unverifiable_evidence');

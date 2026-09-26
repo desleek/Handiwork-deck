@@ -66,9 +66,13 @@ const PresenceBody = z.union([
 techniciansRouter.put('/technicians/me/presence', ...techOnly, async (req, res) => {
   const b = parse(PresenceBody, req.body);
   if (b.online) {
+    const u = await one('SELECT location_disclosure_accepted_at FROM users WHERE id = $1', [currentUser(req).id]);
+    if (!u?.location_disclosure_accepted_at) throw new HttpError(409, 'Accept the location disclosure first', 'disclosure_required');
     await query('UPDATE technician_profiles SET live_lat = $2, live_lng = $3, live_at = now() WHERE user_id = $1', [currentUser(req).id, b.lat, b.lng]);
   } else {
+    // Section 9: location is only held while online — going offline also ends any en-route tracking.
     await query('UPDATE technician_profiles SET live_lat = NULL, live_lng = NULL, live_at = NULL WHERE user_id = $1', [currentUser(req).id]);
+    await query('DELETE FROM job_tracking WHERE technician_id = $1', [currentUser(req).id]);
   }
   res.status(204).end();
 });

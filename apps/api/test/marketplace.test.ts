@@ -131,26 +131,38 @@ describe.skipIf(!hasDb)('marketplace flow', () => {
     const accept = await request(app).post(`/v1/jobs/${ids.job}/quotes/${q1.body.quote.id}/accept`).set('Authorization', bearer(CUSTOMER.uid));
     expect(accept.status).toBe(200);
     expect(accept.body.job).toMatchObject({ status: 'assigned', technician_id: ids.tech });
-    expect(accept.body.whatsappLink).toBe(`https://wa.me/2349000000000?text=${encodeURIComponent(`#${ids.jobRef} `)}`);
+    // WhatsApp is the technician's channel (Section 8): only they get the platform deep link.
+    expect(accept.body.whatsappLink).toBeUndefined();
+    const assignedTechView = await request(app).get(`/v1/jobs/${ids.job}`).set('Authorization', bearer(TECH.uid));
+    expect(assignedTechView.body.whatsappLink).toBe(`https://wa.me/2349000000000?text=${encodeURIComponent(`#${ids.jobRef} `)}`);
+    expect((await request(app).get(`/v1/jobs/${ids.job}`).set('Authorization', bearer(CUSTOMER.uid))).body.whatsappLink).toBeNull();
     expect(scheduler.escalations.map((e) => e.data.kind)).toEqual(['no_show']);
 
     // The losing technician can no longer see the job.
     expect((await request(app).get(`/v1/jobs/${ids.job}`).set('Authorization', bearer(TECH_FAR.uid))).status).toBe(404);
   });
 
-  it('relays WhatsApp messages between the parties without exposing numbers', async () => {
-    const out = await relayInbound({ waMessageId: 'wamid.A', fromE164: CUSTOMER.phone, text: 'Please come after 2pm', timestamp: new Date() });
-    expect(out.status).toBe('relayed');
-    expect(wa.sent).toEqual([{ to: TECH.phone, body: `[#${ids.jobRef}] Customer (Ada): Please come after 2pm` }]);
-    expect(wa.sent[0]!.body).not.toContain(CUSTOMER.phone);
+  it('notifies technicians via WhatsApp and routes their replies into the in-app thread', async () => {
+    // Customer messages in the app; the technician is also notified via the platform WhatsApp number.
+    const m = await request(app).post(`/v1/jobs/${ids.job}/messages`).set('Authorization', bearer(CUSTOMER.uid)).send({ technicianId: ids.tech, body: 'Please come after 2pm' });
+    expect(m.status).toBe(201);
+    expect(scheduler.notifications.at(-1)).toMatchObject({ userId: ids.tech, message: { whatsapp: true, data: { jobRef: ids.jobRef } } });
 
-    // Webhook retry with the same id is ignored.
-    expect((await relayInbound({ waMessageId: 'wamid.A', fromE164: CUSTOMER.phone, text: 'dup', timestamp: new Date() })).status).toBe('duplicate');
-
+    // The technician replies on WhatsApp: it lands in the in-app thread and the customer is notified in the app.
     const reply = await relayInbound({ waMessageId: 'wamid.B', fromE164: TECH.phone, text: `#${ids.jobRef} Noted, see you then`, timestamp: new Date() });
     expect(reply.status).toBe('relayed');
-    expect(wa.sent.at(-1)).toEqual({ to: CUSTOMER.phone, body: `[#${ids.jobRef}] Technician (Tunde): Noted, see you then` });
+    expect(wa.sent).toEqual([]); // nothing is sent to the customer's WhatsApp
+    expect(scheduler.notifications.at(-1)).toMatchObject({ userId: ids.customer, message: { title: 'Tunde replied' } });
+    const thread = await request(app).get(`/v1/jobs/${ids.job}/messages?technicianId=${ids.tech}`).set('Authorization', bearer(CUSTOMER.uid));
+    expect(thread.body.messages.map((x: { body: string; channel: string }) => [x.channel, x.body])).toEqual([
+      ['app', 'Please come after 2pm'],
+      ['whatsapp', 'Noted, see you then'],
+    ]);
 
+    // Webhook retry with the same id is ignored.
+    expect((await relayInbound({ waMessageId: 'wamid.B', fromE164: TECH.phone, text: 'dup', timestamp: new Date() })).status).toBe('duplicate');
+    // Customers are pointed back to the app rather than relayed.
+    expect((await relayInbound({ waMessageId: 'wamid.A', fromE164: CUSTOMER.phone, text: 'hello', timestamp: new Date() })).status).toBe('customer_use_app');
     expect((await relayInbound({ waMessageId: 'wamid.C', fromE164: '+2348099999999', text: 'hi', timestamp: new Date() })).status).toBe('unknown_sender');
     expect((await relayInbound({ waMessageId: 'wamid.D', fromE164: TECH_FAR.phone, text: 'hi', timestamp: new Date() })).status).toBe('no_conversation');
   });

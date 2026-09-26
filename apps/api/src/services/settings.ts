@@ -112,6 +112,20 @@ export const SETTINGS = {
     }),
     default: { cycleDays: DEFAULT_RATE_CYCLE_DAYS, holdAnomalousSwings: true, tiers: DEFAULT_RATE_TIERS },
   },
+  /** Section 10: graduated trust — auto-verify provisional sellers after N clean approvals (off until volume grows). */
+  seller_registry: {
+    schema: z.object({ autoVerifyEnabled: z.boolean(), cleanApprovalsRequired: z.number().int().min(1).max(1000) }),
+    default: { autoVerifyEnabled: false, cleanApprovalsRequired: 5 },
+  },
+  /** Section 9: en-route ETA estimate. */
+  tracking: {
+    schema: z.object({
+      defaultSpeedKmh: z.number().min(1).max(150),
+      roadFactor: z.number().min(1).max(3),
+      staleAfterMinutes: z.number().int().min(1).max(120),
+    }),
+    default: { defaultSpeedKmh: 25, roadFactor: 1.3, staleAfterMinutes: 5 },
+  },
   /** Section 7: platform completion badge for customers. */
   completion_badge: {
     schema: z.object({ minPaidJobs: z.number().int().min(1), minCompletionRate: z.number().min(0).max(1) }),

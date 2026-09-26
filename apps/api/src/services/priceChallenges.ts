@@ -7,6 +7,7 @@ import { audit } from './audit';
 import { refreshQuoteTotals } from './jobs/quotes';
 import { whatsapp } from './messaging/whatsapp';
 import { email } from './notifications/email';
+import { recordCleanApproval } from './sellers';
 import { getSetting } from './settings';
 
 const HOUR = 3_600_000;
@@ -98,6 +99,7 @@ export async function processChallengeStep({ challengeId, step }: ChallengeStepD
         await db.query('SELECT 1 FROM quotes WHERE id = $1 FOR UPDATE', [c.quote_id]);
         if (timeoutAction === 'auto_approve') {
           await applyChallengedPrices(db, challengeId);
+          await recordCleanApproval(db, c.evidence_file_ids);
           await db.query(`UPDATE price_challenges SET status = 'auto_approved', resolved_at = now() WHERE id = $1`, [challengeId]);
         } else {
           await db.query(`UPDATE price_challenges SET status = 'auto_cancelled', resolved_at = now() WHERE id = $1`, [challengeId]);
@@ -123,4 +125,16 @@ export async function processChallengeStep({ challengeId, step }: ChallengeStepD
       return outcome;
     }
   }
+}
+
+/** Tells the technician about a challenge that is now live (urgent wording for Fast Track). */
+export async function notifyTechnicianOfChallenge(challengeId: string) {
+  const c = await one('SELECT pc.*, j.ref AS job_ref FROM price_challenges pc JOIN jobs j ON j.id = pc.job_id WHERE pc.id = $1', [challengeId]);
+  const t = await timelineFor(c.fast_track);
+  await jobs().notify(c.technician_id, {
+    title: c.fast_track ? 'URGENT: parts price challenge' : 'Parts price challenge',
+    body: `The customer challenged your parts prices on #${c.job_ref} with a seller invoice. Please respond within ${t.responseDueHours} hours.`,
+    data: { jobId: c.job_id, type: 'price_challenge', challengeId, urgent: String(c.fast_track) },
+    whatsapp: true,
+  });
 }

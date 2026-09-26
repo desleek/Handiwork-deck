@@ -4,6 +4,7 @@ import {
   allocateReduction,
   canTransition,
   challengeSchedule,
+  estimateEtaMinutes,
   commissionFor,
   DEFAULT_COMMISSION,
   DEFAULT_MARKUP_CAP_BPS,
@@ -177,5 +178,17 @@ describe('completion badge', () => {
     expect(hasCompletionBadge({ paidJobs: 5, engagedJobs: 5, refundedOrDisputed: 0 }, rule)).toBe(true);
     expect(hasCompletionBadge({ paidJobs: 2, engagedJobs: 2, refundedOrDisputed: 0 }, rule)).toBe(false);
     expect(hasCompletionBadge({ paidJobs: 5, engagedJobs: 8, refundedOrDisputed: 0 }, rule)).toBe(false);
+  });
+});
+
+describe('en-route ETA (Section 9)', () => {
+  it('uses reported speed when moving, a default urban speed when stopped', () => {
+    const from = { lat: 6.6, lng: 3.35 };
+    const to = { lat: 6.65, lng: 3.35 }; // ~5.6 km north
+    const stopped = estimateEtaMinutes(from, to, { speedMps: 0, defaultSpeedKmh: 25, roadFactor: 1.3 });
+    expect(stopped.distanceKm).toBe(7.2);
+    expect(stopped.etaMinutes).toBe(18);
+    const driving = estimateEtaMinutes(from, to, { speedMps: 12, defaultSpeedKmh: 25, roadFactor: 1.3 });
+    expect(driving.etaMinutes).toBe(11);
   });
 });

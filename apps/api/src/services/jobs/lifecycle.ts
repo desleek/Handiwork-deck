@@ -2,7 +2,7 @@ import { canTransition, type JobStatus, type UserRole } from '@handiwork/shared'
 import { randomInt } from 'node:crypto';
 import type pg from 'pg';
 import { env } from '../../config/env';
-import { one, tx } from '../../db/pool';
+import { one, pool, tx } from '../../db/pool';
 import { conflict, forbidden, notFound } from '../../lib/errors';
 import { jobs, minutes } from '../../queues/index';
 import { setLiveJobAccess } from '../liveLocation';
@@ -77,9 +77,19 @@ export async function afterTransition(job: JobRecord): Promise<void> {
       ? setLiveJobAccess(job.id, { customerUid: uids.customer_uid, technicianUid: uids.technician_uid, active })
       : Promise.resolve();
 
+  // Section 9: en-route positions are only kept while en route.
+  if (job.status !== 'en_route') await pool.query('DELETE FROM job_tracking WHERE job_id = $1', [job.id]);
+
   switch (job.status) {
     case 'assigned': {
-      await notify(job.technician_id, 'You got the job!', `Your quote for #${job.ref} was accepted.`);
+      if (job.technician_id) {
+        await jobs().notify(job.technician_id, {
+          title: 'You got the job!',
+          body: `Your quote for #${job.ref} was accepted.`,
+          data: { jobId: job.id, jobRef: job.ref, type: 'job.assigned' },
+          whatsapp: true,
+        });
+      }
       const startAt = job.scheduled_for ? new Date(job.scheduled_for).getTime() : Date.now();
       const delay = Math.max(startAt - Date.now(), 0) + minutes(env.ESCALATE_NO_SHOW_AFTER_MIN);
       await jobs().scheduleEscalation({ kind: 'no_show', jobId: job.id }, delay);
@@ -90,6 +100,7 @@ export async function afterTransition(job: JobRecord): Promise<void> {
       await notify(job.customer_id, 'Technician on the way', `Track your technician live for #${job.ref}.`);
       break;
     case 'in_progress':
+      await liveAccess(false);
       await notify(job.customer_id, 'Work started', `Your technician has started work on #${job.ref}.`);
       break;
     case 'completed':

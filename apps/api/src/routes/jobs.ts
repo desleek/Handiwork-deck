@@ -125,7 +125,7 @@ jobsRouter.post('/jobs', authenticate, requireUser('customer'), async (req, res)
 
   if (assigned) {
     await afterTransition(assigned);
-    res.status(201).json({ job: { ...job, ...assigned }, matchedTechnicians: 1, whatsappLink: waDeepLink(job.ref) ?? null });
+    res.status(201).json({ job: { ...job, ...assigned }, matchedTechnicians: 1 });
     return;
   }
 
@@ -136,7 +136,8 @@ jobsRouter.post('/jobs', authenticate, requireUser('customer'), async (req, res)
     await scheduler().notify(b.technicianId!, {
       title: 'Booking request',
       body: `${customer.full_name.split(' ')[0]} wants a quote from you: ${job.title}`,
-      data: { jobId: job.id, type: 'job.request' },
+      data: { jobId: job.id, jobRef: job.ref, type: 'job.request' },
+      whatsapp: true,
     });
     notified = 1;
   } else {
@@ -262,7 +263,6 @@ jobsRouter.get('/jobs/:id', authenticate, requireUser(), async (req, res) => {
     })),
     one('SELECT overall, scores, comment, created_at FROM customer_ratings WHERE job_id = $1', [job.id]),
   ]);
-  const isParty = job.customer_id === user.id || job.technician_id === user.id;
   res.json({
     job,
     quotes,
@@ -270,7 +270,8 @@ jobsRouter.get('/jobs/:id', authenticate, requireUser(), async (req, res) => {
     review: review ?? null,
     customer: user.role === 'customer' ? undefined : customer,
     customerRating: job.technician_id === user.id || user.role === 'admin' ? (customerRating ?? null) : undefined,
-    whatsappLink: isParty && job.technician_id ? (waDeepLink(job.ref) ?? null) : null,
+    // Section 8: WhatsApp is the technician's fallback channel; customers chat in the app.
+    whatsappLink: job.technician_id === user.id ? (waDeepLink(job.ref) ?? null) : null,
   });
 });
 

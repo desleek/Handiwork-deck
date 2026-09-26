@@ -18,6 +18,7 @@ import { jobRequestsRouter } from './routes/jobRequests';
 import { priceChallengesRouter } from './routes/priceChallenges';
 import { jobsRouter } from './routes/jobs';
 import { technicianBusinessRouter } from './routes/technicianBusiness';
+import { trackingRouter } from './routes/tracking';
 import { paymentsRouter, paymentWebhookRouter } from './routes/payments';
 import { techniciansRouter } from './routes/technicians';
 import { uploadsRouter } from './routes/uploads';
@@ -49,6 +50,7 @@ export function createApp() {
     quotesRouter,
     priceChallengesRouter,
     chatRouter,
+    trackingRouter,
     paymentsRouter,
     uploadsRouter,
     adsRouter,

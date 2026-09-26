@@ -25,7 +25,7 @@ const RegisterBody = z
   .refine((b) => b.role !== 'customer' || b.customerType, { message: 'customerType is required for customers', path: ['customerType'] })
   .refine((b) => b.role === 'customer' || !b.customerType, { message: 'customerType is only valid for customers', path: ['customerType'] });
 
-const USER_COLUMNS = 'id, role, full_name, email, phone_e164, customer_type, company_name, created_at';
+const USER_COLUMNS = 'id, role, full_name, email, phone_e164, customer_type, company_name, location_disclosure_accepted_at, created_at';
 
 usersRouter.post('/auth/register', authenticate, async (req, res) => {
   if (req.user) throw conflict('Already registered');

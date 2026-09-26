@@ -7,7 +7,8 @@ import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 import { jobs as scheduler } from '../queues/index';
 import { audit } from '../services/audit';
-import { applyChallengedPrices, scheduleChallenge, timelineFor } from '../services/priceChallenges';
+import { applyChallengedPrices, notifyTechnicianOfChallenge, scheduleChallenge, timelineFor } from '../services/priceChallenges';
+import { recordCleanApproval } from '../services/sellers';
 import { loadJobFor } from './jobs';
 
 /**
@@ -18,12 +19,15 @@ import { loadJobFor } from './jobs';
  */
 export const priceChallengesRouter = Router();
 
-/** Verified spare-parts sellers customers can cite as evidence (Section 10 registry). */
+/** Registry sellers customers can cite as evidence: verified first, then provisionally verified (Section 10). */
 priceChallengesRouter.get('/sellers', authenticate, requireUser(), async (req, res) => {
-  const { q } = parse(z.object({ q: z.string().trim().max(80).optional() }), req.query);
+  const { q, categoryId } = parse(z.object({ q: z.string().trim().max(80).optional(), categoryId: z.coerce.number().int().positive().optional() }), req.query);
   const sellers = await query(
-    `SELECT id, name, city, address FROM spare_parts_sellers WHERE is_verified AND ($1::text IS NULL OR name ILIKE '%' || $1 || '%') ORDER BY name LIMIT 50`,
-    [q ?? null],
+    `SELECT id, name, city, address, status FROM spare_parts_sellers
+      WHERE status IN ('verified', 'provisional') AND ($1::text IS NULL OR name ILIKE '%' || $1 || '%')
+        AND ($2::int IS NULL OR cardinality(category_ids) = 0 OR $2 = ANY(category_ids))
+      ORDER BY (status = 'verified') DESC, name LIMIT 50`,
+    [q ?? null, categoryId ?? null],
   );
   res.json({ sellers });
 });
@@ -43,14 +47,16 @@ priceChallengesRouter.post('/jobs/:id/quotes/:quoteId/price-challenges', authent
   const b = parse(ChallengeBody, req.body);
   const customer = currentUser(req);
 
-  const evidence = await query(
-    `SELECT f.id, s.is_verified FROM files f LEFT JOIN spare_parts_sellers s ON s.id = f.seller_id
+  const evidence = await query<{ id: string; status: string | null }>(
+    `SELECT f.id, s.status FROM files f LEFT JOIN spare_parts_sellers s ON s.id = f.seller_id
       WHERE f.id = ANY($1) AND f.owner_id = $2 AND f.kind = 'price_evidence'`,
     [b.evidenceFileIds, customer.id],
   );
-  if (evidence.length !== new Set(b.evidenceFileIds).size || evidence.some((e) => !e.is_verified)) {
-    throw new HttpError(422, 'Evidence must be an invoice or price proof from a verified seller', 'unverifiable_evidence');
+  if (evidence.length !== new Set(b.evidenceFileIds).size || evidence.some((e) => !e.status || ['flagged', 'removed', 'merged'].includes(e.status))) {
+    throw new HttpError(422, 'Evidence must be an invoice or price proof from a named, accepted seller', 'unverifiable_evidence');
   }
+  // Section 10: a seller not yet in the registry means case-by-case admin review first — not rejection.
+  const needsReview = evidence.some((e) => e.status === 'unlisted');
 
   const { challenge, q } = await tx(async (db) => {
     const q = await one(
@@ -74,9 +80,12 @@ priceChallengesRouter.post('/jobs/:id/quotes/:quoteId/price-challenges', authent
     const t = await timelineFor(b.fastTrack);
     const challenge = await one(
       `INSERT INTO price_challenges (job_id, quote_id, quote_revision, customer_id, technician_id, fast_track, message, evidence_file_ids,
-                                     response_due_at, final_action_at)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now() + make_interval(secs => $9), now() + make_interval(secs => $10)) RETURNING *`,
-      [jobId, quoteId, q.revision, customer.id, q.technician_id, b.fastTrack, b.message ?? null, b.evidenceFileIds, t.responseDueHours * 3600, t.finalActionHours * 3600],
+                                     response_due_at, final_action_at, status)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now() + make_interval(secs => $9), now() + make_interval(secs => $10), $11) RETURNING *`,
+      [
+        jobId, quoteId, q.revision, customer.id, q.technician_id, b.fastTrack, b.message ?? null, b.evidenceFileIds,
+        t.responseDueHours * 3600, t.finalActionHours * 3600, needsReview ? 'pending_review' : 'pending',
+      ],
       db,
     );
     for (const l of b.lines) {
@@ -87,16 +96,21 @@ priceChallengesRouter.post('/jobs/:id/quotes/:quoteId/price-challenges', authent
       );
     }
     await db.query(`UPDATE quotes SET status = 'countered' WHERE id = $1`, [quoteId]);
-    await audit(jobId, customer.id, 'price_challenge.submitted', { challengeId: challenge.id, fastTrack: b.fastTrack, lines: b.lines, evidenceFileIds: b.evidenceFileIds, message: b.message ?? null }, db);
+    await audit(jobId, customer.id, 'price_challenge.submitted', { challengeId: challenge.id, fastTrack: b.fastTrack, lines: b.lines, evidenceFileIds: b.evidenceFileIds, message: b.message ?? null, evidenceReview: needsReview }, db);
     return { challenge, q };
   });
+  if (needsReview) {
+    const admins = await query<{ id: string }>(`SELECT id FROM users WHERE role = 'admin' AND is_active`);
+    await Promise.all(
+      admins.map((a) =>
+        scheduler().notify(a.id, { title: 'Price evidence to review', body: `#${q.job_ref}: evidence cites a seller not in the registry`, data: { jobId, type: 'price_challenge.evidence_review' } }),
+      ),
+    );
+    res.status(201).json({ challenge });
+    return;
+  }
   await scheduleChallenge(challenge.id, b.fastTrack);
-  const t = await timelineFor(b.fastTrack);
-  await scheduler().notify(q.technician_id, {
-    title: b.fastTrack ? 'URGENT: parts price challenge' : 'Parts price challenge',
-    body: `The customer challenged your parts prices on #${q.job_ref} with a seller invoice. Please respond within ${t.responseDueHours} hours.`,
-    data: { jobId, type: 'price_challenge', challengeId: challenge.id, urgent: String(b.fastTrack) },
-  });
+  await notifyTechnicianOfChallenge(challenge.id);
   res.status(201).json({ challenge });
 });
 
@@ -128,7 +142,10 @@ priceChallengesRouter.post('/price-challenges/:id/respond', authenticate, requir
     if (c.technician_id !== tech.id) throw forbidden();
     if (c.status !== 'pending') throw conflict(`Challenge is already ${c.status}`);
     await db.query('SELECT 1 FROM quotes WHERE id = $1 FOR UPDATE', [c.quote_id]);
-    if (b.response === 'match') await applyChallengedPrices(db, id);
+    if (b.response === 'match') {
+      await applyChallengedPrices(db, id);
+      await recordCleanApproval(db, c.evidence_file_ids);
+    }
     const status = { match: 'matched', explain: 'explained', hold_firm: 'held_firm' }[b.response];
     await db.query(`UPDATE price_challenges SET status = $2, technician_response = $3, responded_at = now(), resolved_at = now() WHERE id = $1`, [id, status, b.message ?? null]);
     await db.query(`UPDATE quotes SET status = 'pending' WHERE id = $1 AND status = 'countered'`, [c.quote_id]);
@@ -148,7 +165,11 @@ priceChallengesRouter.post('/price-challenges/:id/withdraw', authenticate, requi
   const id = parse(z.uuid(), req.params.id);
   const user = currentUser(req);
   await tx(async (db) => {
-    const c = await one(`UPDATE price_challenges SET status = 'withdrawn', resolved_at = now() WHERE id = $1 AND customer_id = $2 AND status = 'pending' RETURNING *`, [id, user.id], db);
+    const c = await one(
+      `UPDATE price_challenges SET status = 'withdrawn', resolved_at = now() WHERE id = $1 AND customer_id = $2 AND status IN ('pending', 'pending_review') RETURNING *`,
+      [id, user.id],
+      db,
+    );
     if (!c) throw conflict('No open challenge to withdraw');
     await db.query(`UPDATE quotes SET status = 'pending' WHERE id = $1 AND status = 'countered'`, [c.quote_id]);
     await audit(c.job_id, user.id, 'price_challenge.withdrawn', { challengeId: id }, db);
