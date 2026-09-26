@@ -112,13 +112,21 @@ export class PaystackProvider implements PaymentProvider {
     }
     const payload = JSON.parse(rawBody.toString('utf8')) as {
       event: string;
-      data: { id: number; reference?: string; amount?: number; currency?: string; transaction_reference?: string };
+      data: {
+        id: number;
+        reference?: string;
+        amount?: number;
+        currency?: string;
+        transaction_reference?: string;
+        channel?: string;
+        customer?: { customer_code?: string };
+      };
     };
     const { event, data } = payload;
     const id = `${event}:${data.id}`;
     // Transfers into a customer's dedicated virtual account (per-customer bank transfer).
-    if (event === 'charge.success' && (data as any).channel === 'dedicated_nuban') {
-      return { id, type: 'virtual_account.credited', accountRef: (data as any).customer?.customer_code, amount: data.amount, currency: data.currency, raw: payload };
+    if (event === 'charge.success' && data.channel === 'dedicated_nuban') {
+      return { id, type: 'virtual_account.credited', providerRef: data.reference, accountRef: data.customer?.customer_code, amount: data.amount, currency: data.currency, raw: payload };
     }
     switch (event) {
       case 'charge.success':

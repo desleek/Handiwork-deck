@@ -273,6 +273,8 @@ jobsRouter.get('/jobs/:id', authenticate, requireUser(), async (req, res) => {
     customerRating: job.technician_id === user.id || user.role === 'admin' ? (customerRating ?? null) : undefined,
     // Section 8: WhatsApp is the technician's fallback channel; customers chat in the app.
     whatsappLink: job.technician_id === user.id ? (waDeepLink(job.ref) ?? null) : null,
+    // Section 11: whether the technician must wait for escrow before setting off.
+    escrowRequired: (await getSetting('escrow')).requireFundingBeforeStart,
   });
 });
 

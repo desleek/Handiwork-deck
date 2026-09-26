@@ -1,7 +1,6 @@
 import { createHmac } from 'node:crypto';
 import { describe, expect, it, vi } from 'vitest';
 import { extractInboundMessages, parseJobRef, verifyWhatsAppSignature } from '../src/services/messaging/whatsapp';
-import { parseCurrencyRoutes } from '../src/services/payments/index';
 import { FlutterwaveProvider } from '../src/services/payments/providers/flutterwave';
 import { PaystackProvider } from '../src/services/payments/providers/paystack';
 import { WebhookSignatureError } from '../src/services/payments/types';
@@ -24,6 +23,17 @@ describe('Paystack provider', () => {
   it('rejects a bad signature', async () => {
     const p = new PaystackProvider(secret);
     await expect(p.parseWebhook(Buffer.from('{}'), { 'x-paystack-signature': 'nope' })).rejects.toBeInstanceOf(WebhookSignatureError);
+  });
+
+  it('maps a transfer into a dedicated virtual account to a wallet credit event', async () => {
+    const p = new PaystackProvider(secret);
+    const body = JSON.stringify({
+      event: 'charge.success',
+      data: { id: 77, reference: 'trf_77', amount: 250_000, currency: 'NGN', channel: 'dedicated_nuban', customer: { customer_code: 'CUS_abc' } },
+    });
+    const sig = createHmac('sha512', secret).update(body).digest('hex');
+    const ev = await p.parseWebhook(Buffer.from(body), { 'x-paystack-signature': sig });
+    expect(ev).toMatchObject({ type: 'virtual_account.credited', accountRef: 'CUS_abc', providerRef: 'trf_77', amount: 250_000 });
   });
 
   it('initialises a split transaction with the platform fee as transaction_charge', async () => {
@@ -88,13 +98,6 @@ describe('Flutterwave provider', () => {
     expect(fetchMock).toHaveBeenCalledWith(expect.stringContaining('/transactions/9/verify'), expect.anything());
     expect(ev).toMatchObject({ type: 'payment.succeeded', reference: 'pay-2', amount: 250_000 });
     await expect(p.parseWebhook(Buffer.from(body), { 'verif-hash': 'wrong' })).rejects.toBeInstanceOf(WebhookSignatureError);
-  });
-});
-
-describe('payment routing config', () => {
-  it('parses currency routes', () => {
-    expect(parseCurrencyRoutes('ngn:paystack, KES:flutterwave')).toEqual({ NGN: 'paystack', KES: 'flutterwave' });
-    expect(() => parseCurrencyRoutes('NGN:paypal')).toThrow();
   });
 });
 

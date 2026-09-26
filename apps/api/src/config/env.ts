@@ -15,7 +15,6 @@ const schema = z.object({
   FIREBASE_SERVICE_ACCOUNT_B64: optional,
 
   PAYMENT_DEFAULT_PROVIDER: z.enum(['stripe', 'paystack', 'flutterwave', 'mock']).default('mock'),
-  PAYMENT_CURRENCY_ROUTES: z.string().default(''),
   STRIPE_SECRET_KEY: optional,
   STRIPE_WEBHOOK_SECRET: optional,
   PAYSTACK_SECRET_KEY: optional,

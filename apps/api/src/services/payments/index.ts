@@ -92,19 +92,6 @@ export function isProviderName(v: string): v is ProviderName {
   return REGISTRY.has(v as ProviderName);
 }
 
-/** Parses `NGN:paystack,KES:flutterwave` (legacy env routing) into a lookup table. */
-export function parseCurrencyRoutes(spec: string): Record<string, ProviderName> {
-  const routes: Record<string, ProviderName> = {};
-  for (const part of spec.split(',').map((s) => s.trim()).filter(Boolean)) {
-    const [currency, provider] = part.split(':').map((s) => s.trim());
-    if (!currency || !provider || !['stripe', 'paystack', 'flutterwave', 'mock'].includes(provider)) {
-      throw new Error(`Invalid PAYMENT_CURRENCY_ROUTES entry: "${part}"`);
-    }
-    routes[currency.toUpperCase()] = provider as ProviderName;
-  }
-  return routes;
-}
-
 /**
  * Gateways usable for a currency, in the admin-configured priority order
  * (`payment_routing`), skipping any that are disabled, unconfigured (no keys) or
