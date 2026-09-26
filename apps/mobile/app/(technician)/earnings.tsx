@@ -24,11 +24,19 @@ interface Dashboard {
   payouts: { id: string; currency: string; amount_minor: number; fee_minor: number; net_minor: number; speed: string; status: string; scheduled_for: string; failure_reason: string | null }[];
   promotions: { boosts: { id: string; category_name: string | null; ends_at: string }[]; alerts: { id: string; radius_factor: number; ends_at: string }[] };
   performance: {
-    current: { multiplier: number; tier: string; reasons: string[] };
-    nextTier: { tier: string; multiplier: number } | null;
-    actions: { action: string; resultingMultiplier: number; reachesNextTier: boolean }[];
-    stats: { ratingAvg: number; ratingCount: number; completedJobs: number; technicianCancellations: number; disputes: number };
-    tiers: { tier: string; multiplier: number }[];
+    current: { multiplier: number; adjustmentBps: number; tierStars: number | null; reasons: string[] };
+    rollingRating: number | null;
+    ratingCount: number;
+    projected: { stars: number | null; adjustmentBps: number };
+    next: { stars: number; minRating: number; adjustmentBps: number } | null;
+    ratingNeeded: number | null;
+    tiers: { stars: number; minRating: number; adjustmentBps: number }[];
+    lastCalculatedAt: string | null;
+    nextRecalculationAt: string | null;
+    cycleDays: number;
+    adminOverride: boolean;
+    heldForReview: boolean;
+    stats: { completedJobs: number; technicianCancellations: number; disputes: number };
   };
 }
 interface Promotions {
@@ -36,7 +44,7 @@ interface Promotions {
   eligibility: { eligible: boolean; reasons: string[] };
 }
 
-const TIER: Record<string, string> = { new: 'New', elite: 'Elite', trusted: 'Trusted', standard: 'Standard', under_review: 'Under review' };
+const signed = (bps: number) => `${bps > 0 ? '+' : ''}${bps / 100}%`;
 
 /** Section 4 earnings dashboard. */
 export default function Earnings() {
@@ -77,40 +85,44 @@ export default function Earnings() {
 
   return (
     <Screen>
-      {/* Performance multiplier: current value, drivers, next tier */}
+      {/* Section 7a: performance multiplier = labor rate adjustment from the rolling rating */}
       <Card>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text style={styles.label}>Performance multiplier</Text>
-          <Badge label={TIER[p.current.tier] ?? p.current.tier} tone={p.current.tier === 'under_review' ? 'bad' : p.current.tier === 'elite' ? 'good' : 'neutral'} />
+          <Text style={styles.label}>Performance multiplier (labor only)</Text>
+          <Badge label={p.current.tierStars ? `${p.current.tierStars}★ tier` : 'Not rated yet'} tone={(p.current.tierStars ?? 3) >= 4 ? 'good' : (p.current.tierStars ?? 3) <= 2 ? 'bad' : 'neutral'} />
         </View>
-        <Text style={{ fontSize: 34, fontWeight: '800', color: colors.primary }}>{p.current.multiplier.toFixed(2)}×</Text>
+        <Text style={{ fontSize: 34, fontWeight: '800', color: colors.primary }}>
+          {p.current.multiplier.toFixed(2)}× <Text style={{ fontSize: 16, color: colors.muted }}>({signed(p.current.adjustmentBps)} on labor)</Text>
+        </Text>
         {p.current.reasons.map((r) => (
           <Muted key={r}>• {r}</Muted>
         ))}
         <Muted>
-          {p.stats.completedJobs} completed · {p.stats.ratingCount ? `${p.stats.ratingAvg.toFixed(2)}★ (${p.stats.ratingCount})` : 'no ratings yet'} · {p.stats.technicianCancellations} cancelled ·{' '}
-          {p.stats.disputes} disputes
+          Rolling rating {p.rollingRating != null ? `${p.rollingRating.toFixed(2)}★ from ${p.ratingCount} review(s)` : '—'} (recent reviews count more). Recalculated every {p.cycleDays} days
+          {p.nextRecalculationAt ? ` — next on ${new Date(p.nextRecalculationAt).toLocaleDateString()}` : ''}. Quotes you've already sent keep their rate.
         </Muted>
+        {p.projected.stars !== p.current.tierStars && p.projected.stars !== null && (
+          <Muted>
+            At the next recalculation your rating would put you in the {p.projected.stars}★ tier ({signed(p.projected.adjustmentBps)}).
+          </Muted>
+        )}
+        {p.heldForReview && <Badge label="A recent change is being reviewed by HANDIWORK" tone="warn" />}
+        {p.adminOverride && <Badge label="Rate set by HANDIWORK" tone="neutral" />}
         <View style={[styles.row, { marginTop: 4 }]}>
           {p.tiers.map((t) => (
-            <Badge key={t.tier} label={`${TIER[t.tier]} ≥ ${t.multiplier.toFixed(2)}×`} tone={p.current.multiplier >= t.multiplier ? 'good' : 'neutral'} />
+            <Badge key={t.stars} label={`${t.stars}★ ≥ ${t.minRating.toFixed(1)}: ${signed(t.adjustmentBps)}`} tone={p.current.tierStars === t.stars ? 'good' : 'neutral'} />
           ))}
         </View>
-        {p.nextTier ? (
-          <>
-            <Text style={[styles.label, { marginTop: 6 }]}>
-              Next: {TIER[p.nextTier.tier]} at {p.nextTier.multiplier.toFixed(2)}×
-            </Text>
-            {p.actions.map((a) => (
-              <Muted key={a.action}>
-                {a.reachesNextTier ? '★ ' : '• '}
-                {a.action} → {a.resultingMultiplier.toFixed(2)}×
-              </Muted>
-            ))}
-          </>
+        {p.next ? (
+          <Text style={[styles.label, { marginTop: 6 }]}>
+            Next tier: {p.next.stars}★ ({signed(p.next.adjustmentBps)}) at a rolling rating of {p.ratingNeeded?.toFixed(1)}★
+          </Text>
         ) : (
-          <Muted>You're at the top tier. Keep it up!</Muted>
+          <Muted>You're in the top tier. Keep it up!</Muted>
         )}
+        <Muted>
+          {p.stats.completedJobs} completed · {p.stats.technicianCancellations} cancelled · {p.stats.disputes} disputes
+        </Muted>
       </Card>
 
       {/* Earnings */}

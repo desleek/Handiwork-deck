@@ -20,7 +20,9 @@ export interface Counter {
   proposed_total_minor: number;
   proposed_labor_minor: number | null;
   message: string | null;
-  status: 'pending' | 'accepted' | 'declined' | 'superseded' | 'withdrawn';
+  status: 'pending' | 'accepted' | 'declined' | 'countered' | 'superseded' | 'withdrawn';
+  awaiting: 'customer' | 'technician';
+  created_by_role: 'customer' | 'technician';
   created_at: string;
 }
 
@@ -52,6 +54,7 @@ export interface Quote {
   rating_avg: number;
   rating_count: number;
   labor_only_policy: LaborOnlyPolicy;
+  performance_adjustment_bps: number;
   items: QuoteItem[];
   latest_counter: Counter | null;
   cap_exceptions: CapException[];
@@ -65,8 +68,8 @@ export interface Pricing {
 
 export const COUNTER_LABEL: Record<CounterKind, string> = {
   labor_only: 'Labor only',
-  price_challenge: 'Challenge price',
-  labor_negotiation: 'Negotiate labor',
+  price_challenge: 'Price challenge',
+  labor_negotiation: 'Labor cost proposal',
 };
 
 export const pct = (bps: number) => `${(bps / 100).toFixed(bps % 100 ? 1 : 0)}%`;

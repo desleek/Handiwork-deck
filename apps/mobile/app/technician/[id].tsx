@@ -24,7 +24,7 @@ interface Profile {
   rating_count: number;
   availability: { timezone: string; availableNow: boolean; weekly: { day: number; start: string; end: string }[] };
   instant_book_enabled: boolean;
-  services: { id: number; name: string; icon: string | null; base_rate_minor: number | null; currency: string | null; labor_only_policy: LaborOnlyPolicy }[];
+  services: { id: number; name: string; icon: string | null; base_rate_minor: number | null; standard_rate_minor: number | null; currency: string | null; labor_only_policy: LaborOnlyPolicy; labor_only_declared_at: string | null }[];
   portfolio: { id: string; url: string | null; caption: string | null }[];
   certifications: { title: string; issuer: string | null; is_verified: boolean; expired: boolean }[];
   categoryScores: Record<string, number | null> | null;
@@ -34,13 +34,7 @@ interface Profile {
 
 const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
-const TIER_LABEL: Record<PerformanceMultiplier['tier'], string> = {
-  new: 'New technician',
-  elite: 'Elite performer',
-  trusted: 'Trusted performer',
-  standard: 'Standard',
-  under_review: 'Under review',
-};
+const tierLabel = (p: PerformanceMultiplier) => (p.tierStars ? `${p.tierStars}★ performance tier` : 'New — standard labor rate');
 
 export default function TechnicianProfile() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -52,7 +46,7 @@ export default function TechnicianProfile() {
   if (!data) return <Screen><ErrorText error={error} /></Screen>;
   const t = data.technician;
   const service = t.services.find((s) => s.id === serviceId) ?? t.services[0];
-  const canInstant = t.instant_book_enabled && !!service?.base_rate_minor;
+  const canInstant = t.instant_book_enabled && !!service?.standard_rate_minor;
 
   const book = (mode: 'request' | 'instant') =>
     service &&
@@ -76,13 +70,13 @@ export default function TechnicianProfile() {
       {/* Performance multiplier with its reasons */}
       <Card>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
-          <Text style={styles.label}>{TIER_LABEL[t.performance.tier]}</Text>
+          <Text style={styles.label}>{tierLabel(t.performance)}</Text>
           <Text style={{ fontSize: 18, fontWeight: '800', color: colors.primary }}>{t.performance.multiplier.toFixed(2)}×</Text>
         </View>
         {t.performance.reasons.map((r) => (
           <Muted key={r}>• {r}</Muted>
         ))}
-        <Muted>The performance multiplier reflects ratings, completed jobs and reliability. Higher means ranked higher.</Muted>
+        <Muted>Labor rates follow the technician's rolling rating (recalculated every two weeks). Parts are never adjusted.</Muted>
       </Card>
 
       <Card>
@@ -105,6 +99,7 @@ export default function TechnicianProfile() {
             <Ionicons name="construct-outline" size={18} color={colors.ink} />
             <Text style={{ flex: 1, color: colors.ink }}>
               {service.name}: {LABOR_ONLY_POLICY_LABEL[service.labor_only_policy]}
+              {service.labor_only_declared_at ? <Text style={{ color: colors.muted }}> · since {new Date(service.labor_only_declared_at).toLocaleDateString()}</Text> : null}
             </Text>
           </View>
         )}
@@ -118,7 +113,7 @@ export default function TechnicianProfile() {
         {t.services.map((s) => (
           <Chip
             key={s.id}
-            label={`${s.name}${s.base_rate_minor && s.currency ? ` · from ${formatMoney(s.base_rate_minor, s.currency)}` : ''}`}
+            label={`${s.name}${s.standard_rate_minor && s.currency ? ` · from ${formatMoney(s.standard_rate_minor, s.currency)}` : ''}`}
             selected={service?.id === s.id}
             onPress={() => setServiceId(s.id)}
           />
@@ -127,7 +122,7 @@ export default function TechnicianProfile() {
 
       {user?.role === 'customer' && service && (
         <View style={{ gap: 8 }}>
-          {canInstant && <Button title={`⚡ Instant book — ${formatMoney(service.base_rate_minor, service.currency ?? 'NGN')}`} onPress={() => book('instant')} />}
+          {canInstant && <Button title={`⚡ Instant book — ${formatMoney(service.standard_rate_minor, service.currency ?? 'NGN')}`} onPress={() => book('instant')} />}
           <Button title="Request a booking" variant={canInstant ? 'secondary' : 'primary'} onPress={() => book('request')} />
         </View>
       )}

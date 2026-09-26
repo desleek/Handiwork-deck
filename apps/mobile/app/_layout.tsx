@@ -24,6 +24,7 @@ export default function RootLayout() {
           <Stack.Screen name="wallet" options={{ title: 'Wallet' }} />
           <Stack.Screen name="availability" options={{ title: 'Availability' }} />
           <Stack.Screen name="admin-settings" options={{ title: 'Platform settings' }} />
+          <Stack.Screen name="admin-quality" options={{ title: 'Quality & registry' }} />
           <Stack.Screen name="job/audit/[id]" options={{ title: 'Audit trail' }} />
         </Stack>
       </AuthProvider>

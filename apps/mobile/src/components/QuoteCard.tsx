@@ -6,6 +6,7 @@ import { Text, View } from 'react-native';
 import { api } from '@/lib/api';
 import { formatMoney } from '@/lib/format';
 import { COUNTER_LABEL, pct, type Quote } from '@/lib/quotes';
+import { PriceChallengeForm } from './PriceChallenge';
 import { RatingLine } from './Stars';
 import { Badge, Button, Card, Chip, colors, ErrorText, Field, Muted, styles } from './ui';
 
@@ -80,7 +81,8 @@ function CounterStatus({ quote }: { quote: Quote }) {
 
 /** Customer's view of a quote: breakdown plus approve / counter / chat. */
 export function CustomerQuoteCard({ jobId, quote, open, onChange }: { jobId: string; quote: Quote; open: boolean; onChange: () => void }) {
-  const [counterKind, setCounterKind] = useState<CounterKind | null>(null);
+  const [counterKind, setCounterKind] = useState<Exclude<CounterKind, 'price_challenge'> | null>(null);
+  const [challenging, setChallenging] = useState(false);
   const [amount, setAmount] = useState('');
   const [message, setMessage] = useState('');
   const [busy, setBusy] = useState<string | null>(null);
@@ -102,6 +104,7 @@ export function CustomerQuoteCard({ jobId, quote, open, onChange }: { jobId: str
 
   const pendingCounter = quote.latest_counter?.status === 'pending' ? quote.latest_counter : null;
   const laborOnlyAllowed = quote.labor_only_policy === 'accept' && quote.materials_minor > 0;
+  const hasParts = quote.items.some((i) => i.kind === 'material');
 
   const sendCounter = () =>
     run('counter', () =>
@@ -109,11 +112,12 @@ export function CustomerQuoteCard({ jobId, quote, open, onChange }: { jobId: str
         body: {
           kind: counterKind,
           message: message.trim() || undefined,
-          proposedTotalMinor: counterKind === 'price_challenge' ? toMinor(Number(amount), quote.currency) : undefined,
           proposedLaborMinor: counterKind === 'labor_negotiation' ? toMinor(Number(amount), quote.currency) : undefined,
         },
       }),
     );
+  const respond = (decision: 'accept' | 'decline') =>
+    run(decision, () => api(`/jobs/${jobId}/quotes/${quote.id}/counters/${pendingCounter!.id}/respond`, { body: { decision } }));
 
   return (
     <Card>
@@ -135,16 +139,28 @@ export function CustomerQuoteCard({ jobId, quote, open, onChange }: { jobId: str
 
       <Button title="Chat" variant="secondary" onPress={() => router.push({ pathname: '/chat/[jobId]', params: { jobId, technicianId: quote.technician_id, name: quote.technician_name } })} />
 
-      {open && quote.status === 'pending' && !counterKind && (
+      {open && quote.status === 'pending' && !counterKind && !challenging && (
         <>
           <Button title={`Approve ${formatMoney(quote.amount_minor, quote.currency)}`} loading={busy === 'accept'} onPress={() => run('accept', () => api(`/jobs/${jobId}/quotes/${quote.id}/accept`, { method: 'POST' }))} />
           <View style={styles.row}>
             {laborOnlyAllowed && <Chip label="Labor only" onPress={() => setCounterKind('labor_only')} />}
-            <Chip label="Challenge price" onPress={() => setCounterKind('price_challenge')} />
             {quote.labor_minor > 0 && <Chip label="Negotiate labor" onPress={() => setCounterKind('labor_negotiation')} />}
+            {hasParts && <Chip label="Challenge parts prices" onPress={() => setChallenging(true)} />}
           </View>
-          {quote.labor_only_policy === 'decline' && <Muted>This technician declared no labor-only work for this service.</Muted>}
+          {hasParts && quote.labor_only_policy === 'decline' && <Muted>This technician declared "no labor-only" for this service.</Muted>}
         </>
+      )}
+
+      {challenging && (
+        <PriceChallengeForm
+          jobId={jobId}
+          quote={quote}
+          onCancel={() => setChallenging(false)}
+          onDone={() => {
+            setChallenging(false);
+            onChange();
+          }}
+        />
       )}
 
       {counterKind && (
@@ -152,32 +168,34 @@ export function CustomerQuoteCard({ jobId, quote, open, onChange }: { jobId: str
           <Text style={styles.label}>{COUNTER_LABEL[counterKind]}</Text>
           {counterKind === 'labor_only' && (
             <Muted>
-              You'll supply the materials. New total: {formatMoney(quote.amount_minor - quote.materials_minor, quote.currency)}
+              You'll supply the parts. New total: {formatMoney(quote.labor_minor, quote.currency)}
             </Muted>
           )}
-          {counterKind === 'price_challenge' && <Field label={`Your price (${quote.currency})`} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" />}
           {counterKind === 'labor_negotiation' && (
-            <Field label={`Labor you'd pay (quoted ${formatMoney(quote.labor_minor, quote.currency)})`} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" />
+            <>
+              <Muted>For this job only — it never changes the technician's standard rate for anyone else.</Muted>
+              <Field label={`Labor you'd pay (standard ${formatMoney(quote.labor_minor, quote.currency)})`} value={amount} onChangeText={setAmount} keyboardType="decimal-pad" />
+            </>
           )}
-          <Field
-            label={counterKind === 'price_challenge' ? 'Why? (required)' : 'Message (optional)'}
-            value={message}
-            onChangeText={setMessage}
-            multiline
-          />
-          <Button
-            title="Send counter-offer"
-            loading={busy === 'counter'}
-            disabled={(counterKind !== 'labor_only' && !(Number(amount) > 0)) || (counterKind === 'price_challenge' && !message.trim())}
-            onPress={sendCounter}
-          />
+          <Field label="Message (optional)" value={message} onChangeText={setMessage} multiline />
+          <Button title="Send" loading={busy === 'counter'} disabled={counterKind === 'labor_negotiation' && !(Number(amount) > 0)} onPress={sendCounter} />
           <Button title="Cancel" variant="secondary" onPress={() => setCounterKind(null)} />
         </View>
       )}
 
-      {open && pendingCounter && (
+      {open && pendingCounter?.awaiting === 'customer' && (
+        <View style={{ gap: 6, backgroundColor: '#EEF6FF', padding: 10, borderRadius: 8 }}>
+          <Text style={{ fontWeight: '700', color: colors.ink }}>
+            {quote.technician_name} proposes labor at {formatMoney(pendingCounter.proposed_labor_minor, quote.currency)} (total {formatMoney(pendingCounter.proposed_total_minor, quote.currency)})
+          </Text>
+          {pendingCounter.message ? <Muted>“{pendingCounter.message}”</Muted> : null}
+          <Button title="Accept & book" loading={busy === 'accept'} onPress={() => respond('accept')} />
+          <Button title="Decline (keep standard rate)" variant="secondary" loading={busy === 'decline'} onPress={() => respond('decline')} />
+        </View>
+      )}
+      {open && pendingCounter?.awaiting === 'technician' && (
         <Button
-          title="Withdraw counter-offer"
+          title="Withdraw my offer"
           variant="secondary"
           loading={busy === 'withdraw'}
           onPress={() => run('withdraw', () => api(`/jobs/${jobId}/quotes/${quote.id}/counters/${pendingCounter.id}/withdraw`, { method: 'POST' }))}
@@ -192,12 +210,16 @@ export function CustomerQuoteCard({ jobId, quote, open, onChange }: { jobId: str
 export function TechnicianQuoteCard({ jobId, quote, onRevise, onChange }: { jobId: string; quote: Quote; onRevise: () => void; onChange: () => void }) {
   const [busy, setBusy] = useState<string | null>(null);
   const [error, setError] = useState<unknown>(null);
-  const c = quote.latest_counter?.status === 'pending' ? quote.latest_counter : null;
-  const respond = async (decision: 'accept' | 'decline') => {
+  const open = quote.latest_counter?.status === 'pending' ? quote.latest_counter : null;
+  const c = open?.awaiting === 'technician' ? open : null;
+  const [counterLabor, setCounterLabor] = useState('');
+  const respond = async (decision: 'accept' | 'decline' | 'counter') => {
     setBusy(decision);
     setError(null);
     try {
-      await api(`/jobs/${jobId}/quotes/${quote.id}/counters/${c!.id}/respond`, { body: { decision } });
+      await api(`/jobs/${jobId}/quotes/${quote.id}/counters/${c!.id}/respond`, {
+        body: { decision, proposedLaborMinor: decision === 'counter' ? toMinor(Number(counterLabor), quote.currency) : undefined },
+      });
       onChange();
     } catch (e) {
       setError(e);
@@ -225,17 +247,30 @@ export function TechnicianQuoteCard({ jobId, quote, onRevise, onChange }: { jobI
       {c && (
         <View style={{ gap: 6, backgroundColor: '#FEF3C7', padding: 10, borderRadius: 8 }}>
           <Text style={{ fontWeight: '700', color: '#92400E' }}>
-            Counter-offer: {COUNTER_LABEL[c.kind]} — {formatMoney(c.proposed_total_minor, quote.currency)}
+            {c.kind === 'labor_only' ? 'Labor-only request' : 'Labor cost proposal'} — {formatMoney(c.proposed_total_minor, quote.currency)}
           </Text>
-          {c.kind === 'labor_only' && <Text style={{ color: '#92400E' }}>Customer supplies the materials; your material lines are removed.</Text>}
+          {c.kind === 'labor_only' && (
+            <Text style={{ color: '#92400E' }}>
+              The customer supplies the parts; your part lines are removed. You declared "Accept" for this service, so declining counts toward your labor-only rejection cap.
+            </Text>
+          )}
           {c.kind === 'labor_negotiation' && c.proposed_labor_minor != null && (
-            <Text style={{ color: '#92400E' }}>Labor {formatMoney(quote.labor_minor, quote.currency)} → {formatMoney(c.proposed_labor_minor, quote.currency)}</Text>
+            <Text style={{ color: '#92400E' }}>
+              Labor {formatMoney(quote.labor_minor, quote.currency)} → {formatMoney(c.proposed_labor_minor, quote.currency)} (this job only)
+            </Text>
           )}
           {c.message ? <Text style={{ color: '#92400E' }}>“{c.message}”</Text> : null}
           <Button title="Accept & get booked" loading={busy === 'accept'} onPress={() => respond('accept')} />
-          <Button title="Decline" variant="secondary" loading={busy === 'decline'} onPress={() => respond('decline')} />
+          {c.kind === 'labor_negotiation' && (
+            <>
+              <Field label={`Counter with labor (${quote.currency})`} value={counterLabor} onChangeText={setCounterLabor} keyboardType="decimal-pad" />
+              <Button title="Send counter" variant="secondary" loading={busy === 'counter'} disabled={!(Number(counterLabor) > 0)} onPress={() => respond('counter')} />
+            </>
+          )}
+          <Button title={c.kind === 'labor_negotiation' ? 'Decline — hold my standard rate' : 'Decline'} variant="secondary" loading={busy === 'decline'} onPress={() => respond('decline')} />
         </View>
       )}
+      {open?.awaiting === 'customer' && <Muted>Waiting for the customer to answer your labor counter of {formatMoney(open.proposed_labor_minor, quote.currency)}.</Muted>}
       {!c && quote.latest_counter?.status === 'declined' && <Muted>You declined the customer's last counter-offer.</Muted>}
       {['pending', 'pending_exception', 'countered'].includes(quote.status) && <Button title="Revise quote" variant="secondary" onPress={onRevise} />}
       <ErrorText error={error} />

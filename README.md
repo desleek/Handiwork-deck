@@ -118,10 +118,9 @@ Each supercategory has one **"Other / custom"** entry:
   - Up to 5 portfolio images, enforced on upload.
   - Reviews with category-score tags, plus the average for each category.
   - Certifications, with verified and expired flags.
-  - Labor-only stance: accepts labor-only / case by case / supplies own materials.
-  - The **performance multiplier** (`packages/shared/src/performance.ts`) with its tier and
-    the reasons behind it. It is calculated from rating, completion rate and disputes, and
-    ranges from 0.75 to 1.25. Technicians with fewer than 3 completed jobs stay at 1.00.
+  - The labor-only declaration for each service, and the date it was made.
+  - The **performance multiplier** (the Section 7a labor rate adjustment) with its star
+    tier. Standard rates shown already include it.
 - **Booking modes:**
   - `open` posts the job to everyone nearby.
   - `request` sends it to one technician. If they don't respond, the escalation opens it
@@ -135,13 +134,10 @@ Each supercategory has one **"Other / custom"** entry:
 - **Itemized quotes:** each line is labor, material, transport or other. Technicians can
   revise a quote, and each revision gets a new number. The customer can:
   - **approve** the quote as it is,
-  - send a **labor-only** counter, which drops the material lines (blocked if the
-    technician refuses labor-only work),
-  - send a **price challenge**, which needs a lower total and a reason,
-  - **negotiate labor**, which lowers only the labor part.
+  - send a **labor-only** request, a **parts price challenge** or a **labor
+    negotiation**. Section 6 below describes each one.
 
-  The technician accepts the counter, which hires them at that price and records it as an
-  adjustment line, or declines it. There can be only one open counter per quote.
+  Only one negotiation can be open on a quote at a time.
 - **Payment methods:** card, bank transfer to a one-time virtual account, USSD, and the
   in-app **wallet**. The customer can choose between Paystack and Flutterwave when both
   support the method.
@@ -150,9 +146,8 @@ Each supercategory has one **"Other / custom"** entry:
   - Otherwise the platform collects the payment and credits the technician's share to
     their wallet.
   - Wallet payments settle instantly. The wallet can be topped up through any gateway.
-- **Mandatory reviews:** after every completed job the customer must score all five
-  categories (quality, punctuality, communication, value, professionalism) and write at
-  least 10 characters. Until they do, `POST /jobs` returns `409 review_required`.
+- **Mandatory reviews:** see Section 7. Until the customer has reviewed every paid job,
+  `POST /jobs` returns `409 review_required`.
 
 ### Technician flow (Section 4)
 
@@ -162,7 +157,7 @@ Each supercategory has one **"Other / custom"** entry:
   and payouts are optional.
 - **Labor-only declarations** are made per category ("Accept" or "Decline from
   inception"). They are permanent unless switched, and a switch is allowed once every
-  `labor_only_cooldown_days` (default 90). The declarations are stored in an append-only
+  `labor_only_cooldown_days` (default 30). The declarations are stored in an append-only
   log, so dropping and re-adding a service doesn't reset the cooldown.
 - **Availability calendar:** weekly hours per day, a time zone, and time off.
   `technician_available_at()` in SQL gates matching, instant booking and the "off hours"
@@ -173,8 +168,9 @@ Each supercategory has one **"Other / custom"** entry:
 - **Earnings dashboard** (`GET /technicians/me/earnings`) shows:
   - gross, commission and net earnings, split into labor, parts reimbursed and markup;
   - work still in progress and the wallet balance;
-  - the performance multiplier, what drives it, the tier thresholds, and which
-    improvement would reach the next tier (`nextTierGuidance`).
+  - the performance multiplier (Section 7a): the current star tier and labor %, the rolling
+    rating behind it, every tier's threshold, the rating needed for the next tier, and the
+    date of the next recalculation.
 - **Promotions:** visibility boosts and priority job alerts, which widen a technician's
   alert radius (2× reach). They are paid from the wallet. Prices and eligibility rules are
   admin settings (`promotions`); eligibility requires a verified account, a tier that
@@ -183,9 +179,7 @@ Each supercategory has one **"Other / custom"** entry:
   payouts are sent immediately for a fee. They go through Paystack transfers, Flutterwave
   transfers or a Stripe transfer (plus an instant payout for Stripe). If a transfer fails,
   the amount and fee go back to the wallet.
-- **Customer ratings:** after a job, technicians score customers on paid as agreed, kept to
-  scope, conduct, and (for labor-only jobs) supplied materials. Technicians see a
-  customer's average on future jobs.
+- **Customer ratings:** see Section 7.
 
 ### Pricing model (Section 5)
 
@@ -215,6 +209,85 @@ Each supercategory has one **"Other / custom"** entry:
   add a note. A **permanent per-technician cap override** is a separate action.
 - Every request, evidence file and decision is logged in the job's audit trail
   (`GET /jobs/:id/audit`, and the Audit trail screen in the app).
+
+### Customer quote responses (Section 6)
+
+1. **Approve as-is.**
+2. **Labor-only request.** Only offered when the technician declared "Accept" for that
+   category. Each request records the declaration in force when it was made, so a later
+   switch never changes past history.
+   - If a technician declines a request in a category they accepted, it counts as a
+     rejection for that category.
+   - More than `labor_only_rejections.cap` rejections (default 3) within `windowDays`
+     (default 90) adds a rating penalty (`penaltyPoints`) and opens a technician flag.
+   - Switching the declaration doesn't clear earlier rejections.
+   - A category declared "Decline from inception" never receives these requests, so it
+     never builds up a penalty.
+3. **Parts price challenge** (before the job starts, `POST …/price-challenges`).
+   - Evidence is a `price_evidence` upload tied to a seller in the verified registry
+     (`spare_parts_sellers`, standing in for Section 10). An unverified seller is rejected
+     at upload.
+   - The technician can **match** the price (the new base cost applies and their disclosed
+     markup % is kept), **explain** the difference, or **hold firm**.
+   - If they don't respond, BullMQ runs the timeline in `packages/shared/src/priceChallenge.ts`:
+
+     | | Standard | Fast Track (urgent, chosen by the customer) |
+     |---|---|---|
+     | Response expected | 6h | 2h |
+     | Reminders | every 4h, hours 6–30 | hourly to hour 8 |
+     | Admin escalation, plus email and WhatsApp to the technician | 48h | 8h |
+     | Automatic outcome | 72h | 24h |
+
+   - The automatic outcome is the same for every case (`price_challenge.timeoutAction`).
+     By default the customer's evidenced prices are applied. An admin can switch this
+     globally to auto-cancel, which tells the customer to send a labor-only request
+     instead.
+   - Fast Track cases are marked urgent for the technician and appear first in the
+     admin queue.
+4. **Labor cost negotiation.** The customer proposes a lower labor cost for this job
+   only. The technician's standard labor already includes their performance adjustment.
+   - The technician can accept, decline (keeping the standard rate), or counter with an
+     amount between the proposal and the standard rate. The customer then accepts or
+     declines that counter.
+   - The published rate never changes. Every rate and outcome is written to the job's
+     audit trail.
+
+### Dual ratings (Section 7)
+
+- **Customer → technician** (mandatory): scores for competence, punctuality,
+  professionalism, courtesy, delivery timeline, transparency/pricing fairness, and quality
+  of work, plus a written review. Public reviews show tags for their category scores. New
+  bookings are blocked until the review is submitted.
+- **Technician → customer** (optional): on site as scheduled, granted access, paid
+  through the platform, and respectful conduct. Technicians see the customer's average
+  on feed cards and job pages before they accept.
+- **Platform completion badge** for customers: at least 3 paid jobs, with at least 90% of
+  the jobs they hired someone for paid in full through the platform (`completion_badge`).
+- Both kinds of rating are only accepted on bookings that were completed and paid through
+  the platform with a verified technician.
+
+### Performance-based labor rate (Section 7a)
+
+- The **rolling rating** is a weighted-recent average (half-life `rating.halfLifeDays`,
+  default 180) minus any active penalties. The same number is the public rating.
+- On a fixed cycle (`rate_adjustment.cycleDays`, default 14, checked by an hourly worker
+  job) the rating maps to a tier. The tier's percentage applies to labor only:
+
+  | Tier | Rating | Labor rate |
+  |---|---|---|
+  | 5★ | 4.5 or more | +10% |
+  | 4★ | 3.5 to 4.49 | +5% |
+  | 3★ | 2.5 to 3.49 | no change |
+  | 2★ | 1.5 to 2.49 | −5% |
+  | 1★ | below 1.5 | −10% |
+
+- Each quote records the adjustment in force when it is first submitted, and it appears
+  as a disclosed "Performance rate adjustment" line. Revisions and quotes that are already
+  approved keep their original rate.
+- If a tier drops only because of the most recent review, the change is held for admin
+  review. Admins can also flag a change that was already applied, override a technician's
+  rate, and edit the tiers, percentages and cycle length.
+- The same rolling rating decides boost eligibility.
 
 ### WhatsApp relay
 
@@ -279,13 +352,14 @@ with a warning.
 | Technicians | `PUT /technicians/me`, `PUT /technicians/me/presence`, `PUT /technicians/me/services`, `POST /technicians/me/payout-account`, `POST/DELETE /technicians/me/portfolio`, `POST/DELETE /technicians/me/certifications`, `GET /technicians/:id` |
 | Jobs | `POST /jobs`, `GET /jobs[?feed=nearby]`, `GET /jobs/:id`, `POST /jobs/:id/status`, `POST /jobs/:id/review` |
 | Job requests | `POST /jobs/:id/request/accept`, `POST /jobs/:id/request/decline`, `POST /jobs/:id/instant/decline`, `POST /jobs/:id/dismiss`, `GET /jobs/:id/invoice`, `GET /jobs/:id/audit`, `POST /jobs/:id/customer-rating` |
+| Price challenges | `GET /sellers`, `POST /jobs/:id/quotes/:quoteId/price-challenges`, `GET /jobs/:id/price-challenges`, `POST /price-challenges/:id/respond`, `POST /price-challenges/:id/withdraw` |
 | Quotes | `POST /jobs/:id/quotes`, `PUT /jobs/:id/quotes/:quoteId`, `POST …/items/:itemId/receipt`, `POST …/withdraw`, `POST …/accept`, `POST …/counter`, `POST …/counters/:counterId/respond`, `POST …/counters/:counterId/withdraw` |
 | Chat | `GET /jobs/:id/conversations`, `GET/POST /jobs/:id/messages` |
 | Payments | `GET /payments/options`, `POST /jobs/:id/payments`, `GET /wallet`, `POST /wallet/topups`, `POST /webhooks/payments/:provider` |
 | WhatsApp | `GET/POST /webhooks/whatsapp` |
 | Files | `POST /uploads`, `POST /uploads/:id/complete` |
 | Ads | `POST /ads`, `GET /ads/mine`, `POST /ads/:id/status`, `GET /ads/placements`, `POST /ads/:id/click` |
-| Admin | `GET /admin/cap-exceptions`, `POST /admin/cap-exceptions/:id/decide`, `PUT /admin/technicians/:id/markup-cap`, `GET /admin/settings`, `PUT /admin/settings/:key`, `GET/POST/PATCH /admin/categories`, `GET /admin/category-suggestions`, `POST …/:id/approve`, `POST …/:id/reject`, `GET/POST/DELETE /admin/boosts`, `POST /admin/certifications/:id/verify`, `GET /admin/stats`, `GET /admin/technicians`, `POST /admin/technicians/:id/verification`, `POST /admin/users/:id/active`, `GET /admin/escalations`, `POST /admin/escalations/:id/resolve`, `GET /admin/ads`, `POST /admin/ads/:id/review`, `POST /admin/payments/:id/refund` |
+| Admin | `GET /admin/price-challenges`, `POST /admin/price-challenges/:id/resolve`, `GET/POST/PATCH /admin/sellers`, `GET /admin/flags`, `POST /admin/flags/:id/resolve`, `GET /admin/rate-adjustments`, `POST /admin/rate-adjustments/:id/decide`, `POST /admin/rate-adjustments/:id/flag`, `PUT /admin/technicians/:id/rate-override`, `POST /admin/technicians/:id/recalculate-rate`, `POST /admin/technicians/:id/rating-penalties`, `GET /admin/cap-exceptions`, `POST /admin/cap-exceptions/:id/decide`, `PUT /admin/technicians/:id/markup-cap`, `GET /admin/settings`, `PUT /admin/settings/:key`, `GET/POST/PATCH /admin/categories`, `GET /admin/category-suggestions`, `POST …/:id/approve`, `POST …/:id/reject`, `GET/POST/DELETE /admin/boosts`, `POST /admin/certifications/:id/verify`, `GET /admin/stats`, `GET /admin/technicians`, `POST /admin/technicians/:id/verification`, `POST /admin/users/:id/active`, `GET /admin/escalations`, `POST /admin/escalations/:id/resolve`, `GET /admin/ads`, `POST /admin/ads/:id/review`, `POST /admin/payments/:id/refund` |
 
 ## Deployment notes
 
@@ -307,6 +381,10 @@ with a warning.
 - **Escrow:** funds are split when the customer pays, after the job is marked completed.
   Holding funds until the customer confirms would mean moving Stripe to separate charges
   and transfers and using delayed settlement on Paystack/Flutterwave.
+- **Section 10 seller registry:** `spare_parts_sellers` is a placeholder that admins
+  maintain by hand. Seller onboarding and verification will come with Section 10.
+- **WhatsApp template:** the `price_challenge_escalation` template has to be approved in
+  Meta Business Manager before escalation messages can be delivered.
 - **Section 16 specifics:** boosts and alerts can be bought from the wallet, with
   eligibility checks that are placeholders until Section 16 arrives. Paying for them
   through a gateway isn't wired up yet.

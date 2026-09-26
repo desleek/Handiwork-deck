@@ -6,8 +6,10 @@ import { Alert, Text, View } from 'react-native';
 import { AdSlot } from '@/components/AdSlot';
 import { LiveMap } from '@/components/LiveMap';
 import { PaymentPicker } from '@/components/PaymentPicker';
+import { PriceChallengePanel } from '@/components/PriceChallenge';
 import { QuoteBuilder } from '@/components/QuoteBuilder';
 import { CustomerRatingForm } from '@/components/CustomerRatingForm';
+import { CustomerTrust } from '@/components/CustomerTrust';
 import { InvoiceCard } from '@/components/InvoiceCard';
 import { CustomerQuoteCard, TechnicianQuoteCard } from '@/components/QuoteCard';
 import { ReviewForm } from '@/components/ReviewForm';
@@ -45,7 +47,7 @@ interface Detail {
   quotes: Quote[];
   history: { to_status: JobStatus; note: string | null; created_at: string }[];
   review: { overall: number; comment: string } | null;
-  customer?: { first_name: string; customer_type: string; rating_avg: number; rating_count: number };
+  customer?: { first_name: string; customer_type: string; ratingAvg: number | null; ratingCount: number; paidJobs: number; completionBadge: boolean };
   customerRating?: { overall: number } | null;
   whatsappLink: string | null;
 }
@@ -102,10 +104,7 @@ export default function JobDetail() {
       {job.description ? <Text style={{ color: colors.ink }}>{job.description}</Text> : null}
       {job.budget_minor != null && <Text style={{ fontWeight: '600' }}>{formatMoney(job.budget_minor, job.currency)}</Text>}
       {user.role === 'technician' && data.customer && (
-        <Muted>
-          Customer: {data.customer.first_name} ({data.customer.customer_type}) ·{' '}
-          {data.customer.rating_count ? `agreement compliance ★ ${Number(data.customer.rating_avg).toFixed(1)} from ${data.customer.rating_count} job(s)` : 'no compliance ratings yet'}
-        </Muted>
+        <CustomerTrust name={`${data.customer.first_name} (${data.customer.customer_type})`} trust={data.customer} />
       )}
 
       {/* ---------- technician: booking requests & instant bookings addressed to me ---------- */}
@@ -162,6 +161,10 @@ export default function JobDetail() {
       )}
       {isCustomer && !negotiating && quotes.filter((q) => q.status === 'accepted').map((q) => <CustomerQuoteCard key={q.id} jobId={job.id} quote={q} open={false} onChange={reload} />)}
 
+      {negotiating && (isCustomer || user.role === 'technician' || user.role === 'admin') && (
+        <PriceChallengePanel jobId={job.id} currency={job.currency} role={isCustomer ? 'customer' : user.role === 'technician' ? 'technician' : 'admin'} onChange={reload} />
+      )}
+
       {/* ---------- technician: quote / revise / respond to counters ---------- */}
       {user.role === 'technician' && negotiating && (!myQuote || revising) && (
         <QuoteBuilder
@@ -210,9 +213,9 @@ export default function JobDetail() {
       {isCustomer && job.status === 'completed' && job.budget_minor != null && (
         <PaymentPicker jobId={job.id} amountMinor={job.budget_minor} currency={job.currency} onPaid={reload} />
       )}
-      {isCustomer && (job.status === 'completed' || job.status === 'paid') && !data.review && <ReviewForm jobId={job.id} onDone={reload} />}
-      {isTech && (job.status === 'completed' || job.status === 'paid') && data.customerRating === null && (
-        <CustomerRatingForm jobId={job.id} laborOnly={job.labor_only} onDone={reload} />
+      {isCustomer && job.status === 'paid' && !data.review && <ReviewForm jobId={job.id} onDone={reload} />}
+      {isTech && job.status === 'paid' && data.customerRating === null && (
+        <CustomerRatingForm jobId={job.id} onDone={reload} />
       )}
       {data.review && (
         <Muted>

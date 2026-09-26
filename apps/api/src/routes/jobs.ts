@@ -234,7 +234,7 @@ jobsRouter.get('/jobs/:id', authenticate, requireUser(), async (req, res) => {
     query(
       `SELECT q.id, q.technician_id, q.amount_minor, q.labor_minor, q.materials_minor, q.currency, q.message, q.eta_minutes,
               q.status, q.revision, q.labor_only, q.created_at, q.updated_at,
-              q.parts_base_minor, q.markup_minor,
+              q.parts_base_minor, q.markup_minor, q.performance_adjustment_bps,
               u.full_name AS technician_name, tp.rating_avg, tp.rating_count,
               COALESCE(ts.labor_only_policy, 'decline') AS labor_only_policy,
               (SELECT coalesce(json_agg(i ORDER BY i.position), '[]'::json) FROM (
@@ -245,7 +245,7 @@ jobsRouter.get('/jobs/:id', authenticate, requireUser(), async (req, res) => {
                  SELECT id, quote_item_id, line_description, requested_markup_bps, cap_bps, status, admin_note, created_at
                    FROM cap_exception_requests WHERE quote_id = q.id AND quote_revision = q.revision AND status <> 'withdrawn') e) AS cap_exceptions,
               (SELECT row_to_json(c) FROM (
-                 SELECT id, kind, proposed_total_minor, proposed_labor_minor, message, status, created_at, responded_at
+                 SELECT id, kind, proposed_total_minor, proposed_labor_minor, message, status, awaiting, created_by_role, created_at, responded_at
                    FROM quote_counters WHERE quote_id = q.id ORDER BY created_at DESC LIMIT 1) c) AS latest_counter
          FROM quotes q JOIN users u ON u.id = q.technician_id JOIN technician_profiles tp ON tp.user_id = q.technician_id
          JOIN jobs jj ON jj.id = q.job_id

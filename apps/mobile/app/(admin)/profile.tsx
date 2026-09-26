@@ -6,6 +6,7 @@ export default function AdminProfile() {
   return (
     <ProfileScreen>
       <Button title="Pricing & platform settings" variant="secondary" onPress={() => router.push('/admin-settings')} />
+      <Button title="Quality: sellers, flags, rate reviews" variant="secondary" onPress={() => router.push('/admin-quality')} />
     </ProfileScreen>
   );
 }

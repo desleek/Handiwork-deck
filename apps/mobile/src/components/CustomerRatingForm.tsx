@@ -1,13 +1,13 @@
-import { CUSTOMER_RATING_LABEL, requiredCustomerRatingCategories } from '@handiwork/shared';
+import { CUSTOMER_RATING_CATEGORIES, CUSTOMER_RATING_LABEL } from '@handiwork/shared';
 import { useState } from 'react';
 import { Text } from 'react-native';
 import { api } from '@/lib/api';
 import { StarPicker } from './Stars';
 import { Button, Card, ErrorText, Field, Muted, styles } from './ui';
 
-/** Section 4: the technician rates the customer on how well they kept to the agreement. */
-export function CustomerRatingForm({ jobId, laborOnly, onDone }: { jobId: string; laborOnly: boolean; onDone: () => void }) {
-  const cats = requiredCustomerRatingCategories(laborOnly);
+/** Section 7: the technician rates the customer on agreement compliance (optional; visible to other technicians). */
+export function CustomerRatingForm({ jobId, onDone }: { jobId: string; onDone: () => void }) {
+  const cats = CUSTOMER_RATING_CATEGORIES;
   const [scores, setScores] = useState<Record<string, number>>({});
   const [comment, setComment] = useState('');
   const [busy, setBusy] = useState(false);

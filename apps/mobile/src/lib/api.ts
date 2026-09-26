@@ -39,11 +39,11 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
 }
 
 /** Uploads a local file (from the image picker) through a signed upload ticket. Returns the file id. */
-export async function uploadFile(localUri: string, kind: string, contentType: string): Promise<string> {
+export async function uploadFile(localUri: string, kind: string, contentType: string, extra: Record<string, string> = {}): Promise<string> {
   const { fileId, upload } = await api<{
     fileId: string;
     upload: { uploadUrl: string; method: 'PUT' | 'POST'; headers?: Record<string, string>; fields?: Record<string, string> };
-  }>('/uploads', { body: { kind, contentType } });
+  }>('/uploads', { body: { kind, contentType, ...extra } });
   const blob = await (await fetch(localUri)).blob();
   if (upload.method === 'PUT') {
     const r = await fetch(upload.uploadUrl, { method: 'PUT', headers: upload.headers, body: blob });

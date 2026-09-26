@@ -1,6 +1,7 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
 import { Text, View } from 'react-native';
 import { iconFor } from '@/lib/categories';
+import { CustomerTrust, type Trust } from './CustomerTrust';
 import { formatMoney, STATUS_LABEL } from '@/lib/format';
 import { Badge, Card, colors, Muted } from './ui';
 import type { JobStatus } from '@handiwork/shared';
@@ -16,6 +17,8 @@ export interface JobSummary {
   category_name?: string;
   category_icon?: string | null;
   needs_review?: boolean;
+  /** Technician feed: the customer's agreement compliance and completion badge (Section 7). */
+  customer?: Trust;
   distance_km?: number;
   already_quoted?: boolean;
 }
@@ -42,6 +45,7 @@ export function JobCard({ job, onPress, highlight }: { job: JobSummary; onPress:
         <Badge label={job.already_quoted ? 'You quoted' : STATUS_LABEL[job.status]} tone={tone(job.status)} />
         {job.budget_minor != null && <Text style={{ fontWeight: '600' }}>{formatMoney(job.budget_minor, job.currency)}</Text>}
       </View>
+      {job.customer && <CustomerTrust trust={job.customer} />}
     </Card>
   );
 }
