@@ -224,9 +224,10 @@ Each supercategory has one **"Other / custom"** entry:
    - A category declared "Decline from inception" never receives these requests, so it
      never builds up a penalty.
 3. **Parts price challenge** (before the job starts, `POST …/price-challenges`).
-   - Evidence is a `price_evidence` upload tied to a seller in the verified registry
-     (`spare_parts_sellers`, standing in for Section 10). An unverified seller is rejected
-     at upload.
+   - Evidence is a `price_evidence` upload that names its seller, either from the
+     Section 10 registry or as a new seller. Evidence from flagged or removed sellers is
+     rejected at upload. Evidence from an unlisted seller is reviewed by an admin before
+     the technician is asked.
    - The technician can **match** the price (the new base cost applies and their disclosed
      markup % is kept), **explain** the difference, or **hold firm**.
    - If they don't respond, BullMQ runs the timeline in `packages/shared/src/priceChallenge.ts`:
@@ -289,19 +290,69 @@ Each supercategory has one **"Other / custom"** entry:
   rate, and edit the tiers, percentages and cycle length.
 - The same rolling rating decides boost eligibility.
 
-### WhatsApp relay
+### Masked communication (Section 8)
 
-Customers and technicians message the **platform's** WhatsApp number. Neither side sees the
-other's number.
+- **In-app chat is the primary channel.** There is one thread per job and technician. Each
+  message is stored twice: the masked text the parties see, and the unmasked original.
+  Admins can read the originals as dispute evidence (`GET /admin/jobs/:id/messages`, and
+  the "Full chat log" screen).
+- **WhatsApp is the technicians' fallback.** Important technician notifications also go out
+  from the central WhatsApp number (the `whatsapp` flag on a notification). These cover:
+  customer messages, booking requests, being hired, quote counters, and price challenges.
+  - Inside WhatsApp's 24-hour window this is plain text. Outside it, the approved
+    `technician_notification` template is used.
+  - Replies sent to that number go into the job's in-app thread. The technician is
+    identified by their phone number, and a leading `#HW-XXXXX` picks the job. The
+    customer is then notified in the app.
+  - Customers who message the number are asked to use the app instead. The customer's
+    number is never involved.
+- **Real contact details** come from `GET /jobs/:id/contact`, and only once the job is
+  approved (a quote has been accepted). Before that the endpoint returns
+  `403 contact_locked` and phone numbers or emails in messages are masked. Every release
+  is written to the audit trail.
 
-- The sender is identified by their phone number. The conversation is their only open job,
-  or the one named by a leading `#HW-XXXXX` reference. If several jobs could match, the
-  sender is asked to add the reference.
-- Messages are forwarded as `[#HW-7K2QD] Customer (Ada): …`, stored, and deduplicated on
-  WhatsApp's message ID.
-- The app opens a `wa.me` deep link with the job reference already filled in.
-- The conversation is created when a quote is accepted and closed when the job is paid or
-  cancelled.
+### Live location (Section 9)
+
+- **Discovery map:** while a technician is online, their app sends a heartbeat every
+  minute. Positions older than 15 minutes aren't shown, and they're rounded to about
+  100 m.
+- **En route:** the technician's app sends its position (`PUT /jobs/:id/location`). The
+  customer sees the position, the distance and an ETA (`GET /jobs/:id/tracking`,
+  `estimateEtaMinutes`).
+  - The ETA uses straight-line distance × 1.3 at the technician's reported speed, or
+    25 km/h when they're stopped (`tracking` setting).
+  - When Firebase is configured, positions are also mirrored to Firestore so the map
+    updates instantly.
+- **Only while online:** positions are only accepted while the technician is online and
+  the job is en route. Going offline or arriving deletes the stored position.
+- **Permission disclosures:**
+  - The app shows its own disclosure before the OS permission prompt, and the acceptance
+    is recorded with `POST /me/location-disclosure`.
+  - Only foreground ("when in use") location is requested. The iOS "Always" strings are
+    removed, and Android's `ACCESS_BACKGROUND_LOCATION` is blocked in `app.json`.
+
+### Spare-parts seller registry (Section 10)
+
+Trust grows in stages: an **unlisted** seller becomes **provisional**, then **verified**.
+Admins can also mark a seller **flagged**, **removed** or **merged**.
+
+- **Seeding:** admins add sellers with a name, registration/ID, contact details and the
+  categories they supply. Admin-added sellers start as verified.
+- **Growing from evidence:**
+  - A customer can name a seller who isn't listed. The seller is recorded as `unlisted`,
+    matched to existing records by name and phone (last 10 digits).
+  - The challenge then waits in `pending_review`, and the technician's clock doesn't start
+    until an admin decides.
+  - If the admin accepts the evidence, the seller becomes **provisional**.
+  - If they reject it, the challenge closes.
+- **Clean approvals:** each challenge settled in favour of a seller's evidence counts as a
+  clean approval for that seller. This covers a technician match, an admin approval, or
+  an automatic approval. With `seller_registry.autoVerifyEnabled` on (off by default),
+  provisional sellers become verified after `cleanApprovalsRequired` clean approvals.
+- **Admin tools:** add and edit sellers, upgrade provisional sellers to verified, flag or
+  remove sellers (with a reason), and merge duplicates. A merge moves the evidence files and
+  clean-approval counts onto the record being kept, and citing the old record automatically
+  resolves to it. The same screen holds the auto-verification settings.
 
 ## Getting started
 
@@ -354,12 +405,13 @@ with a warning.
 | Job requests | `POST /jobs/:id/request/accept`, `POST /jobs/:id/request/decline`, `POST /jobs/:id/instant/decline`, `POST /jobs/:id/dismiss`, `GET /jobs/:id/invoice`, `GET /jobs/:id/audit`, `POST /jobs/:id/customer-rating` |
 | Price challenges | `GET /sellers`, `POST /jobs/:id/quotes/:quoteId/price-challenges`, `GET /jobs/:id/price-challenges`, `POST /price-challenges/:id/respond`, `POST /price-challenges/:id/withdraw` |
 | Quotes | `POST /jobs/:id/quotes`, `PUT /jobs/:id/quotes/:quoteId`, `POST …/items/:itemId/receipt`, `POST …/withdraw`, `POST …/accept`, `POST …/counter`, `POST …/counters/:counterId/respond`, `POST …/counters/:counterId/withdraw` |
-| Chat | `GET /jobs/:id/conversations`, `GET/POST /jobs/:id/messages` |
+| Chat & contact | `GET /jobs/:id/conversations`, `GET/POST /jobs/:id/messages`, `GET /jobs/:id/contact` |
+| Tracking | `POST /me/location-disclosure`, `PUT /jobs/:id/location`, `GET /jobs/:id/tracking` |
 | Payments | `GET /payments/options`, `POST /jobs/:id/payments`, `GET /wallet`, `POST /wallet/topups`, `POST /webhooks/payments/:provider` |
 | WhatsApp | `GET/POST /webhooks/whatsapp` |
 | Files | `POST /uploads`, `POST /uploads/:id/complete` |
 | Ads | `POST /ads`, `GET /ads/mine`, `POST /ads/:id/status`, `GET /ads/placements`, `POST /ads/:id/click` |
-| Admin | `GET /admin/price-challenges`, `POST /admin/price-challenges/:id/resolve`, `GET/POST/PATCH /admin/sellers`, `GET /admin/flags`, `POST /admin/flags/:id/resolve`, `GET /admin/rate-adjustments`, `POST /admin/rate-adjustments/:id/decide`, `POST /admin/rate-adjustments/:id/flag`, `PUT /admin/technicians/:id/rate-override`, `POST /admin/technicians/:id/recalculate-rate`, `POST /admin/technicians/:id/rating-penalties`, `GET /admin/cap-exceptions`, `POST /admin/cap-exceptions/:id/decide`, `PUT /admin/technicians/:id/markup-cap`, `GET /admin/settings`, `PUT /admin/settings/:key`, `GET/POST/PATCH /admin/categories`, `GET /admin/category-suggestions`, `POST …/:id/approve`, `POST …/:id/reject`, `GET/POST/DELETE /admin/boosts`, `POST /admin/certifications/:id/verify`, `GET /admin/stats`, `GET /admin/technicians`, `POST /admin/technicians/:id/verification`, `POST /admin/users/:id/active`, `GET /admin/escalations`, `POST /admin/escalations/:id/resolve`, `GET /admin/ads`, `POST /admin/ads/:id/review`, `POST /admin/payments/:id/refund` |
+| Admin | `GET /admin/jobs/:id/messages`, `GET /admin/price-challenges`, `POST /admin/price-challenges/:id/review-evidence`, `POST /admin/price-challenges/:id/resolve`, `GET/POST/PATCH /admin/sellers`, `POST /admin/sellers/:id/status`, `POST /admin/sellers/:id/merge`, `GET /admin/flags`, `POST /admin/flags/:id/resolve`, `GET /admin/rate-adjustments`, `POST /admin/rate-adjustments/:id/decide`, `POST /admin/rate-adjustments/:id/flag`, `PUT /admin/technicians/:id/rate-override`, `POST /admin/technicians/:id/recalculate-rate`, `POST /admin/technicians/:id/rating-penalties`, `GET /admin/cap-exceptions`, `POST /admin/cap-exceptions/:id/decide`, `PUT /admin/technicians/:id/markup-cap`, `GET /admin/settings`, `PUT /admin/settings/:key`, `GET/POST/PATCH /admin/categories`, `GET /admin/category-suggestions`, `POST …/:id/approve`, `POST …/:id/reject`, `GET/POST/DELETE /admin/boosts`, `POST /admin/certifications/:id/verify`, `GET /admin/stats`, `GET /admin/technicians`, `POST /admin/technicians/:id/verification`, `POST /admin/users/:id/active`, `GET /admin/escalations`, `POST /admin/escalations/:id/resolve`, `GET /admin/ads`, `POST /admin/ads/:id/review`, `POST /admin/payments/:id/refund` |
 
 ## Deployment notes
 
@@ -381,10 +433,9 @@ with a warning.
 - **Escrow:** funds are split when the customer pays, after the job is marked completed.
   Holding funds until the customer confirms would mean moving Stripe to separate charges
   and transfers and using delayed settlement on Paystack/Flutterwave.
-- **Section 10 seller registry:** `spare_parts_sellers` is a placeholder that admins
-  maintain by hand. Seller onboarding and verification will come with Section 10.
-- **WhatsApp template:** the `price_challenge_escalation` template has to be approved in
-  Meta Business Manager before escalation messages can be delivered.
+- **WhatsApp templates:** `price_challenge_escalation` and `technician_notification` have to
+  be approved in Meta Business Manager. They're used for business-initiated messages
+  outside WhatsApp's 24-hour window.
 - **Section 16 specifics:** boosts and alerts can be bought from the wallet, with
   eligibility checks that are placeholders until Section 16 arrives. Paying for them
   through a gateway isn't wired up yet.

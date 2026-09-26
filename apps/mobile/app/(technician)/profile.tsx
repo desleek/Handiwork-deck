@@ -9,6 +9,7 @@ import { Image, Pressable, Switch, Text, View } from 'react-native';
 import { ProfileScreen } from '@/components/ProfileScreen';
 import { Badge, Button, Card, Chip, colors, ErrorText, Field, Muted, styles } from '@/components/ui';
 import { api, ApiError, uploadFile } from '@/lib/api';
+import { ensureLocationPermission } from '@/lib/locationPermission';
 import { useAuth } from '@/lib/auth';
 import { type Category, SEGMENT_LABEL } from '@/lib/categories';
 import { useApi } from '@/lib/useApi';
@@ -80,8 +81,7 @@ export default function TechnicianProfile() {
 
   const saveBase = () =>
     run('base', async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') throw new Error('Location permission denied');
+      if (!(await ensureLocationPermission('share'))) throw new Error('Location permission is needed to set your base');
       const pos = await Location.getCurrentPositionAsync({});
       await put({ baseLat: pos.coords.latitude, baseLng: pos.coords.longitude, serviceRadiusKm: Number(radius) || 15, bio: bio.trim() || undefined, headline: headline.trim() || undefined });
       return 'Profile and base location saved';

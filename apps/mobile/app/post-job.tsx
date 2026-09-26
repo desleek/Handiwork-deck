@@ -5,6 +5,7 @@ import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { Button, Chip, ErrorText, Field, Muted, Screen, styles, Title } from '@/components/ui';
 import { api, ApiError, uploadFile } from '@/lib/api';
+import { ensureLocationPermission } from '@/lib/locationPermission';
 import { Alert, View } from 'react-native';
 
 const CURRENCIES = ['NGN', 'GHS', 'KES', 'USD'];
@@ -34,8 +35,7 @@ export default function PostJob() {
   const useMyLocation = async () => {
     setError(null);
     try {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') throw new Error('Location permission denied');
+      if (!(await ensureLocationPermission('find'))) throw new Error('Location permission denied — type the address instead');
       const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       setCoords({ lat: pos.coords.latitude, lng: pos.coords.longitude });
       if (!address) {

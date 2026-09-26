@@ -68,7 +68,7 @@ export default function Chat() {
       <KeyboardAvoidingView style={{ flex: 1 }} behavior={Platform.OS === 'ios' ? 'padding' : undefined} keyboardVerticalOffset={90}>
         {!unlocked && (
           <View style={{ backgroundColor: '#EEF0F3', padding: 10 }}>
-            <Muted>🔒 Phone numbers and emails are hidden until a quote is approved. Messages also reach the other party via our WhatsApp number.</Muted>
+            <Muted>🔒 Phone numbers and emails are hidden until the job is approved. Every message is kept as a record for both of you.</Muted>
           </View>
         )}
         <FlatList

@@ -8,6 +8,7 @@ import { LiveMap } from '@/components/LiveMap';
 import { PaymentPicker } from '@/components/PaymentPicker';
 import { PriceChallengePanel } from '@/components/PriceChallenge';
 import { QuoteBuilder } from '@/components/QuoteBuilder';
+import { ContactReveal } from '@/components/ContactReveal';
 import { CustomerRatingForm } from '@/components/CustomerRatingForm';
 import { CustomerTrust } from '@/components/CustomerTrust';
 import { InvoiceCard } from '@/components/InvoiceCard';
@@ -142,7 +143,12 @@ export default function JobDetail() {
 
       {(job.status === 'en_route' || job.status === 'in_progress') && isCustomer && <LiveMap jobId={job.id} job={job} />}
 
-      {whatsappLink && <Button title="Message on WhatsApp" variant="whatsapp" onPress={() => Linking.openURL(whatsappLink)} />}
+      {/* Section 8: WhatsApp is the technician's fallback channel from the platform number */}
+      {whatsappLink && isTech && <Button title="Open WhatsApp updates for this job" variant="whatsapp" onPress={() => Linking.openURL(whatsappLink)} />}
+      {job.technician_id && (isCustomer || isTech) && (
+        <ContactReveal jobId={job.id} unlocked={['assigned', 'en_route', 'in_progress', 'completed', 'paid', 'disputed'].includes(job.status)} />
+      )}
+      {user.role === 'admin' && <Button title="Full chat log (disputes)" variant="secondary" onPress={() => router.push(`/job/chatlog/${job.id}`)} />}
       {job.technician_id && (isCustomer || isTech) && (
         <Button title="Open chat" variant="secondary" onPress={() => chatWith(job.technician_id!, isCustomer ? 'Technician' : 'Customer')} />
       )}

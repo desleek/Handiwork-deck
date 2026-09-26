@@ -10,24 +10,48 @@
       "bundleIdentifier": "com.handiworkdeck.app",
       "supportsTablet": false,
       "infoPlist": {
-        "NSLocationWhenInUseUsageDescription": "Your location is used to find technicians near you and to show your technician's live position.",
-        "NSLocationAlwaysAndWhenInUseUsageDescription": "While you are en route to a job, your location is shared live with the customer.",
-        "NSCameraUsageDescription": "Take photos of the job, receipts and your portfolio.",
-        "NSPhotoLibraryUsageDescription": "Attach photos of the job, receipts and your portfolio."
+        "NSLocationWhenInUseUsageDescription": "Customers: your location finds technicians near you and sets the job address. Technicians: while you're online, your location shows you on customers' maps and, when you're on the way to a job, gives that customer your live position and ETA. Location is only used while the app is open.",
+        "NSCameraUsageDescription": "Take photos of the job, receipts, price evidence and your portfolio.",
+        "NSPhotoLibraryUsageDescription": "Attach photos of the job, receipts, price evidence and your portfolio."
       }
     },
     "android": {
       "package": "com.handiworkdeck.app",
-      "permissions": ["ACCESS_COARSE_LOCATION", "ACCESS_FINE_LOCATION", "CAMERA", "POST_NOTIFICATIONS"]
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION",
+        "CAMERA",
+        "POST_NOTIFICATIONS"
+      ],
+      "blockedPermissions": [
+        "android.permission.ACCESS_BACKGROUND_LOCATION"
+      ]
     },
     "plugins": [
       "expo-router",
       "expo-status-bar",
       "expo-web-browser",
       "expo-secure-store",
-      ["expo-location", { "isAndroidForegroundServiceEnabled": true }],
+      [
+        "expo-location",
+        {
+          "locationWhenInUsePermission": "Customers: your location finds technicians near you and sets the job address. Technicians: while you're online, your location shows you on customers' maps and, when you're on the way to a job, gives that customer your live position and ETA. Location is only used while the app is open.",
+          "isIosBackgroundLocationEnabled": false,
+          "isAndroidBackgroundLocationEnabled": false,
+          "isAndroidForegroundServiceEnabled": false,
+          "locationAlwaysAndWhenInUsePermission": false,
+          "locationAlwaysPermission": false
+        }
+      ],
       "expo-notifications",
-      "expo-image-picker"
+      [
+        "expo-image-picker",
+        {
+          "microphonePermission": false,
+          "photosPermission": "Attach photos of the job, receipts, price evidence and your portfolio.",
+          "cameraPermission": "Take photos of the job, receipts, price evidence and your portfolio."
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": false

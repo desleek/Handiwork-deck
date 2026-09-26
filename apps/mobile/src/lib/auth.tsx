@@ -5,6 +5,7 @@ import { createContext, type ReactNode, useCallback, useContext, useEffect, useM
 import { api, ApiError, setTokenGetter } from './api';
 import { FIREBASE_ENABLED } from './config';
 import { firebaseAuth } from './firebase';
+import { setDisclosureAccepted } from './locationPermission';
 
 export interface AppUser {
   id: string;
@@ -14,6 +15,7 @@ export interface AppUser {
   phone_e164: string | null;
   customer_type: string | null;
   company_name: string | null;
+  location_disclosure_accepted_at: string | null;
 }
 
 interface AuthState {
@@ -45,6 +47,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const refresh = useCallback(async () => {
     try {
       const { user } = await api<{ user: AppUser }>('/me');
+      setDisclosureAccepted(Boolean(user.location_disclosure_accepted_at));
       setUser(user);
     } catch (e) {
       if (e instanceof ApiError && (e.status === 403 || e.status === 401)) setUser(null);

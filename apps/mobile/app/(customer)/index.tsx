@@ -10,6 +10,7 @@ import { AdSlot } from '@/components/AdSlot';
 import { TechCard } from '@/components/TechCard';
 import { Button, Chip, colors, ErrorText, Loading, Muted, styles } from '@/components/ui';
 import { api } from '@/lib/api';
+import { ensureLocationPermission } from '@/lib/locationPermission';
 import { type Category, iconFor, SEGMENT_LABEL } from '@/lib/categories';
 import type { DiscoverResult, TechCardData } from '@/lib/discover';
 import { useApi } from '@/lib/useApi';
@@ -31,8 +32,7 @@ export default function Discover() {
   // Location filter: the customer's current position (if permitted).
   useEffect(() => {
     (async () => {
-      const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status !== 'granted') return;
+      if (!(await ensureLocationPermission('find'))) return;
       const pos = await Location.getCurrentPositionAsync({ accuracy: Location.Accuracy.Balanced });
       setHere({ lat: pos.coords.latitude, lng: pos.coords.longitude });
     })().catch(() => {});

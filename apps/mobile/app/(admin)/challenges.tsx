@@ -14,6 +14,7 @@ interface Challenge {
   technician_name: string;
   customer_name: string;
   fast_track: boolean;
+  status: 'pending' | 'pending_review';
   escalated_at: string | null;
   reminders_sent: number;
   message: string | null;
@@ -21,7 +22,7 @@ interface Challenge {
   final_action_at: string;
   created_at: string;
   lines: { description: string; current_unit_price_minor: number; proposed_unit_price_minor: number }[];
-  evidence: { id: string; url: string | null; seller: string; sellerVerified: boolean }[] | null;
+  evidence: { id: string; url: string | null; seller: string; sellerStatus: string }[] | null;
 }
 
 /** Section 6c admin queue: Fast Track cases first and visually distinct, then escalated, then oldest. */
@@ -40,10 +41,10 @@ export default function Challenges() {
 function ChallengeCard({ c, onDone }: { c: Challenge; onDone: () => void }) {
   const [note, setNote] = useState('');
   const [error, setError] = useState<unknown>(null);
-  const resolve = async (decision: 'approve_customer' | 'uphold_technician') => {
+  const call = async (path: string, decision: string) => {
     setError(null);
     try {
-      await api(`/admin/price-challenges/${c.id}/resolve`, { body: { decision, note: note.trim() || undefined } });
+      await api(`/admin/price-challenges/${c.id}/${path}`, { body: { decision, note: note.trim() || undefined } });
       onDone();
     } catch (e) {
       setError(e);
@@ -53,6 +54,7 @@ function ChallengeCard({ c, onDone }: { c: Challenge; onDone: () => void }) {
     <Card style={c.fast_track ? { borderColor: colors.danger, borderWidth: 2, backgroundColor: '#FFF5F5' } : undefined}>
       <View style={styles.row}>
         {c.fast_track && <Badge label="⚡ FAST TRACK" tone="bad" />}
+        {c.status === 'pending_review' && <Badge label="Evidence review (unlisted seller)" tone="warn" />}
         {c.escalated_at && <Badge label="Escalated" tone="warn" />}
         <Text style={{ fontWeight: '700', color: colors.ink }} onPress={() => router.push(`/job/${c.job_id}`)}>
           #{c.job_ref} ›
@@ -69,13 +71,23 @@ function ChallengeCard({ c, onDone }: { c: Challenge; onDone: () => void }) {
       {c.message ? <Text>“{c.message}”</Text> : null}
       <View style={styles.row}>
         {c.evidence?.map((e, i) => (
-          <Chip key={e.id} label={`${e.seller} ${e.sellerVerified ? '✓' : '(unverified)'} · ${i + 1}`} onPress={() => e.url && WebBrowser.openBrowserAsync(e.url)} />
+          <Chip key={e.id} label={`${e.seller} (${e.sellerStatus}) · ${i + 1}`} onPress={() => e.url && WebBrowser.openBrowserAsync(e.url)} />
         ))}
       </View>
-      <Muted>Auto-resolves {new Date(c.final_action_at).toLocaleString()}</Muted>
       <Field label="Note (optional)" value={note} onChangeText={setNote} multiline />
-      <Button title="Apply customer's prices" onPress={() => resolve('approve_customer')} />
-      <Button title="Uphold technician's prices" variant="secondary" onPress={() => resolve('uphold_technician')} />
+      {c.status === 'pending_review' ? (
+        <>
+          <Muted>The technician isn't asked until the evidence is accepted. Accepting adds unlisted sellers as provisionally verified.</Muted>
+          <Button title="Accept evidence" onPress={() => call('review-evidence', 'accept')} />
+          <Button title="Reject evidence" variant="secondary" onPress={() => call('review-evidence', 'reject')} />
+        </>
+      ) : (
+        <>
+          <Muted>Auto-resolves {new Date(c.final_action_at).toLocaleString()}</Muted>
+          <Button title="Apply customer's prices" onPress={() => call('resolve', 'approve_customer')} />
+          <Button title="Uphold technician's prices" variant="secondary" onPress={() => call('resolve', 'uphold_technician')} />
+        </>
+      )}
       <ErrorText error={error} />
     </Card>
   );

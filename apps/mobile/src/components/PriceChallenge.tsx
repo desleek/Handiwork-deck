@@ -2,7 +2,7 @@ import { toMinor } from '@handiwork/shared';
 import * as ImagePicker from 'expo-image-picker';
 import { useState } from 'react';
 import { Switch, Text, View } from 'react-native';
-import { api, uploadFile } from '@/lib/api';
+import { api, uploadFileDetailed } from '@/lib/api';
 import { formatMoney } from '@/lib/format';
 import type { Quote } from '@/lib/quotes';
 import { useApi } from '@/lib/useApi';
@@ -12,6 +12,7 @@ interface Seller {
   id: string;
   name: string;
   city: string | null;
+  status: 'verified' | 'provisional';
 }
 
 /**
@@ -21,8 +22,13 @@ interface Seller {
 export function PriceChallengeForm({ jobId, quote, onCancel, onDone }: { jobId: string; quote: Quote; onCancel: () => void; onDone: () => void }) {
   const parts = quote.items.filter((i) => i.kind === 'material');
   const [search, setSearch] = useState('');
-  const { data } = useApi<{ sellers: Seller[] }>(`/sellers${search ? `?q=${encodeURIComponent(search)}` : ''}`);
+  const { data } = useApi<{ sellers: Seller[] }>(`/sellers?${search ? `q=${encodeURIComponent(search)}` : ''}`);
   const [seller, setSeller] = useState<Seller | null>(null);
+  const [unlisted, setUnlisted] = useState(false);
+  const [newName, setNewName] = useState('');
+  const [newPhone, setNewPhone] = useState('');
+  const [newCity, setNewCity] = useState('');
+  const [needsReview, setNeedsReview] = useState(false);
   const [prices, setPrices] = useState<Record<string, string>>({});
   const [evidence, setEvidence] = useState<string[]>([]);
   const [message, setMessage] = useState('');
@@ -35,15 +41,20 @@ export function PriceChallengeForm({ jobId, quote, onCancel, onDone }: { jobId: 
     .map((p) => ({ itemId: p.id, proposedUnitPriceMinor: toMinor(Number(prices[p.id]), quote.currency) }));
 
   const addEvidence = async () => {
-    if (!seller) return setError(new Error('Choose the verified seller first'));
+    if (!unlisted && !seller) return setError(new Error('Choose the seller first, or add one that isn\'t listed'));
+    if (unlisted && newName.trim().length < 2) return setError(new Error("Enter the seller's name"));
     setError(null);
     try {
       const r = await ImagePicker.launchImageLibraryAsync({ mediaTypes: ['images'], quality: 0.8 });
       const a = r.assets?.[0];
       if (r.canceled || !a) return;
-      // Rejected by the server unless the seller is in the verified registry.
-      const id = await uploadFile(a.uri, 'price_evidence', a.mimeType ?? 'image/jpeg', { sellerId: seller.id });
-      setEvidence((e) => [...e, id]);
+      // Section 10: registry sellers are accepted automatically; unlisted ones go to admin review.
+      const extra = unlisted
+        ? { newSeller: { name: newName.trim(), phone: newPhone.trim() || undefined, city: newCity.trim() || undefined } }
+        : { sellerId: seller!.id };
+      const res = await uploadFileDetailed(a.uri, 'price_evidence', a.mimeType ?? 'image/jpeg', extra);
+      if (res.seller?.needsReview) setNeedsReview(true);
+      setEvidence((e) => [...e, res.fileId]);
     } catch (e) {
       setError(e);
     }
@@ -77,11 +88,28 @@ export function PriceChallengeForm({ jobId, quote, onCancel, onDone }: { jobId: 
         />
       ))}
       <Field label="Verified seller" value={search} onChangeText={setSearch} placeholder="Search the seller registry" />
-      <View style={styles.row}>
-        {data?.sellers.map((s) => (
-          <Chip key={s.id} label={`${s.name}${s.city ? ` · ${s.city}` : ''}`} selected={seller?.id === s.id} onPress={() => setSeller(s)} />
-        ))}
-      </View>
+      {!unlisted && (
+        <View style={styles.row}>
+          {data?.sellers.map((s) => (
+            <Chip
+              key={s.id}
+              label={`${s.name}${s.city ? ` · ${s.city}` : ''}${s.status === 'provisional' ? ' (provisional)' : ' ✓'}`}
+              selected={seller?.id === s.id}
+              onPress={() => setSeller(s)}
+            />
+          ))}
+        </View>
+      )}
+      <Chip label={unlisted ? 'Pick from the registry instead' : "Seller isn't listed?"} selected={unlisted} onPress={() => setUnlisted((v) => !v)} />
+      {unlisted && (
+        <>
+          <Field label="Seller name" value={newName} onChangeText={setNewName} />
+          <Field label="Seller phone (optional)" value={newPhone} onChangeText={setNewPhone} keyboardType="phone-pad" />
+          <Field label="City (optional)" value={newCity} onChangeText={setNewCity} />
+          <Muted>Evidence from sellers not yet in our registry is checked by our team first; the technician is asked once it's accepted.</Muted>
+        </>
+      )}
+      {needsReview && <Badge label="This evidence will be reviewed by HANDIWORK first" tone="warn" />}
       <View style={styles.row}>
         <Badge label={`${evidence.length} evidence file(s)`} tone={evidence.length ? 'good' : 'warn'} />
         <Chip label="Upload invoice / price proof" onPress={addEvidence} />
@@ -107,6 +135,7 @@ interface Challenge {
   fast_track: boolean;
   message: string | null;
   technician_response: string | null;
+  evidence_review_note: string | null;
   response_due_at: string;
   final_action_at: string;
   escalated_at: string | null;
@@ -115,6 +144,8 @@ interface Challenge {
 }
 
 const STATUS: Record<string, string> = {
+  pending_review: 'Evidence under review by HANDIWORK',
+  evidence_rejected: 'Evidence not accepted',
   pending: 'Awaiting technician',
   matched: 'Matched by technician',
   explained: 'Technician explained',
@@ -156,7 +187,7 @@ export function PriceChallengePanel({ jobId, currency, role, onChange }: { jobId
       {data.challenges.map((c) => (
         <View key={c.id} style={{ gap: 4, borderTopWidth: 1, borderColor: colors.line, paddingTop: 6 }}>
           <View style={styles.row}>
-            <Badge label={STATUS[c.status] ?? c.status} tone={c.status === 'pending' ? 'warn' : 'neutral'} />
+            <Badge label={STATUS[c.status] ?? c.status} tone={c.status === 'pending' || c.status === 'pending_review' ? 'warn' : c.status === 'evidence_rejected' ? 'bad' : 'neutral'} />
             {c.fast_track && <Badge label="URGENT · Fast Track" tone="bad" />}
             {c.escalated_at && c.status === 'pending' && <Badge label="Escalated to admin" tone="bad" />}
           </View>
@@ -170,6 +201,7 @@ export function PriceChallengePanel({ jobId, currency, role, onChange }: { jobId
           ))}
           {c.message ? <Muted>Customer: “{c.message}”</Muted> : null}
           {c.technician_response ? <Muted>Technician: “{c.technician_response}”</Muted> : null}
+          {c.evidence_review_note ? <Muted>HANDIWORK: “{c.evidence_review_note}”</Muted> : null}
           {c.status === 'pending' && (
             <Muted>
               Response due {new Date(c.response_due_at).toLocaleString()} · auto-resolves {new Date(c.final_action_at).toLocaleString()}
@@ -189,7 +221,7 @@ export function PriceChallengePanel({ jobId, currency, role, onChange }: { jobId
               <Button title="Hold firm" variant="secondary" loading={busy === 'hold'} onPress={() => act('hold', () => api(`/price-challenges/${c.id}/respond`, { body: { response: 'hold_firm' } }))} />
             </>
           )}
-          {c.status === 'pending' && role === 'customer' && (
+          {(c.status === 'pending' || c.status === 'pending_review') && role === 'customer' && (
             <Button title="Withdraw challenge" variant="secondary" loading={busy === 'withdraw'} onPress={() => act('withdraw', () => api(`/price-challenges/${c.id}/withdraw`, { method: 'POST' }))} />
           )}
         </View>

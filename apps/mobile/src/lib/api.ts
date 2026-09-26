@@ -39,10 +39,21 @@ export async function api<T = any>(path: string, opts: { method?: string; body?:
 }
 
 /** Uploads a local file (from the image picker) through a signed upload ticket. Returns the file id. */
-export async function uploadFile(localUri: string, kind: string, contentType: string, extra: Record<string, string> = {}): Promise<string> {
-  const { fileId, upload } = await api<{
+export async function uploadFile(localUri: string, kind: string, contentType: string, extra: Record<string, unknown> = {}): Promise<string> {
+  return (await uploadFileDetailed(localUri, kind, contentType, extra)).fileId;
+}
+
+export interface UploadResult {
+  fileId: string;
+  /** Price evidence: the seller it was attributed to, and whether it needs admin review (Section 10). */
+  seller?: { id: string; name: string; status: string; needsReview: boolean };
+}
+
+export async function uploadFileDetailed(localUri: string, kind: string, contentType: string, extra: Record<string, unknown> = {}): Promise<UploadResult> {
+  const { fileId, upload, seller } = await api<{
     fileId: string;
     upload: { uploadUrl: string; method: 'PUT' | 'POST'; headers?: Record<string, string>; fields?: Record<string, string> };
+    seller?: UploadResult['seller'];
   }>('/uploads', { body: { kind, contentType, ...extra } });
   const blob = await (await fetch(localUri)).blob();
   if (upload.method === 'PUT') {
@@ -57,5 +68,5 @@ export async function uploadFile(localUri: string, kind: string, contentType: st
     const { secure_url } = await r.json();
     await api(`/uploads/${fileId}/complete`, { body: { url: secure_url } });
   }
-  return fileId;
+  return { fileId, seller };
 }

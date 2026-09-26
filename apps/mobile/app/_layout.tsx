@@ -26,6 +26,7 @@ export default function RootLayout() {
           <Stack.Screen name="admin-settings" options={{ title: 'Platform settings' }} />
           <Stack.Screen name="admin-quality" options={{ title: 'Quality & registry' }} />
           <Stack.Screen name="job/audit/[id]" options={{ title: 'Audit trail' }} />
+          <Stack.Screen name="job/chatlog/[id]" options={{ title: 'Chat log' }} />
         </Stack>
       </AuthProvider>
     </SafeAreaProvider>
