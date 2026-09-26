@@ -1,4 +1,4 @@
-import { nextTierGuidance, TIER_THRESHOLDS } from '@handiwork/shared';
+import { multiplierFor, nextTierGuidance, type RateTier } from '@handiwork/shared';
 import { Router } from 'express';
 import { z } from 'zod';
 import { one, query, tx } from '../db/pool';
@@ -7,7 +7,7 @@ import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 import { jobs as scheduler } from '../queues/index';
 import { nextStandardBatch, payoutFee } from '../services/payouts';
-import { multiplierFromRow } from '../services/performance';
+import { nextRecalculationAt } from '../services/rateAdjustment';
 import { getSetting, markupCapFor } from '../services/settings';
 import { postToWallet } from '../services/wallet';
 
@@ -15,15 +15,37 @@ import { postToWallet } from '../services/wallet';
 export const technicianBusinessRouter = Router();
 technicianBusinessRouter.use('/technicians/me', authenticate, requireUser('technician'));
 
-async function performanceStats(techId: string) {
-  const s = await one('SELECT * FROM technician_performance_stats WHERE technician_id = $1', [techId]);
+/**
+ * Section 7a performance: rolling rating, current star tier and labor adjustment,
+ * the thresholds for every tier, and when it will next be recalculated.
+ */
+async function performanceSummary(techId: string) {
+  const cfg = await getSetting('rate_adjustment');
+  const p = await one(
+    `SELECT rating_avg::float8 AS rating_avg, rating_count, rate_adjustment_bps, rate_tier_stars, rate_rating_used::float8 AS rate_rating_used,
+            rate_calculated_at, rate_override_bps, rate_held_for_review
+       FROM technician_profiles WHERE user_id = $1`,
+    [techId],
+  );
+  const s = await one('SELECT completed_jobs, technician_cancellations, disputes FROM technician_performance_stats WHERE technician_id = $1', [techId]);
+  const rating = p.rating_count ? Number(p.rating_avg) : null;
+  const bps = p.rate_override_bps ?? p.rate_adjustment_bps;
+  const guidance = nextTierGuidance(rating, cfg.tiers as RateTier[]);
   return {
-    ratingAvg: Number(s.rating_avg),
-    ratingCount: s.rating_count,
-    completedJobs: s.completed_jobs,
-    technicianCancellations: s.technician_cancellations,
-    disputes: s.disputes,
-    raw: s,
+    current: multiplierFor(p.rate_rating_used ?? rating, bps, p.rate_tier_stars),
+    rollingRating: rating,
+    ratingCount: p.rating_count,
+    /** The tier the current rolling rating would give at the next recalculation. */
+    projected: guidance.current,
+    next: guidance.next,
+    ratingNeeded: guidance.ratingNeeded,
+    tiers: guidance.tiers,
+    lastCalculatedAt: p.rate_calculated_at,
+    nextRecalculationAt: await nextRecalculationAt(techId),
+    cycleDays: cfg.cycleDays,
+    adminOverride: p.rate_override_bps !== null,
+    heldForReview: p.rate_held_for_review,
+    stats: { completedJobs: s.completed_jobs, technicianCancellations: s.technician_cancellations, disputes: s.disputes },
   };
 }
 
@@ -34,7 +56,6 @@ async function performanceStats(techId: string) {
  */
 technicianBusinessRouter.get('/technicians/me/earnings', async (req, res) => {
   const techId = currentUser(req).id;
-  const stats = await performanceStats(techId);
   const [byCurrency, pending, wallet, payouts, promotions] = await Promise.all([
     query(
       `SELECT p.currency,
@@ -60,36 +81,14 @@ technicianBusinessRouter.get('/technicians/me/earnings', async (req, res) => {
     query('SELECT id, currency, amount_minor, fee_minor, net_minor, speed, status, scheduled_for, created_at, failure_reason FROM payouts WHERE technician_id = $1 ORDER BY created_at DESC LIMIT 10', [techId]),
     activePromotions(techId),
   ]);
-  const guidance = nextTierGuidance(stats);
   res.json({
     earnings: byCurrency,
     pending,
     wallet,
     payouts,
     promotions,
-    performance: {
-      ...guidance,
-      stats: {
-        ratingAvg: stats.ratingAvg,
-        ratingCount: stats.ratingCount,
-        completedJobs: stats.completedJobs,
-        technicianCancellations: stats.technicianCancellations,
-        disputes: stats.disputes,
-      },
-      tiers: TIER_THRESHOLDS,
-    },
+    performance: await performanceSummary(techId),
   });
-});
-
-/** Pricing rules that apply to this technician's quotes (for the quote builder). */
-technicianBusinessRouter.get('/technicians/me/pricing', async (req, res) => {
-  const techId = currentUser(req).id;
-  const [markupCapBps, commission, receiptThresholdMinor] = await Promise.all([
-    markupCapFor(techId),
-    getSetting('commission'),
-    getSetting('receipt_threshold_minor'),
-  ]);
-  res.json({ markupCapBps, commission, receiptThresholdMinor });
 });
 
 // ---------------------------------------------------------------- promotions
@@ -106,23 +105,25 @@ async function activePromotions(techId: string) {
   return { boosts, alerts };
 }
 
-/** Section 16 eligibility (admin-configurable): verified, performance tier, rating floor, no open disputes. */
+/**
+ * Section 16 eligibility (admin-configurable). Per Section 7a the same rolling
+ * rating that sets the labor rate gates boosts.
+ */
 async function promotionEligibility(techId: string) {
   const { eligibility } = await getSetting('promotions');
-  const stats = await performanceStats(techId);
-  const profile = await one(
-    `SELECT tp.verification_status, u.is_active,
-            (SELECT count(*) FROM jobs j WHERE j.technician_id = tp.user_id AND j.status = 'disputed')::int AS open_disputes
+  const p = await one(
+    `SELECT tp.verification_status, u.is_active, tp.rating_avg::float8 AS rating_avg, tp.rating_count,
+            (SELECT count(*) FROM jobs j WHERE j.technician_id = tp.user_id AND j.status = 'disputed')::int AS open_disputes,
+            (SELECT count(*) FROM technician_flags f WHERE f.technician_id = tp.user_id AND f.status = 'open')::int AS open_flags
        FROM technician_profiles tp JOIN users u ON u.id = tp.user_id WHERE tp.user_id = $1`,
     [techId],
   );
-  const perf = multiplierFromRow(stats.raw);
   const reasons: string[] = [];
-  if (eligibility.requireVerified && profile.verification_status !== 'verified') reasons.push('Your account must be verified');
-  if (!profile.is_active) reasons.push('Your account is suspended');
-  if (eligibility.blockedTiers.includes(perf.tier)) reasons.push(`Not available in the "${perf.tier.replace('_', ' ')}" performance tier`);
-  if (stats.ratingCount > 0 && stats.ratingAvg < eligibility.minRatingAvg) reasons.push(`Average rating must be at least ${eligibility.minRatingAvg}★`);
-  if (profile.open_disputes > eligibility.maxOpenDisputes) reasons.push('Resolve your open disputes first');
+  if (eligibility.requireVerified && p.verification_status !== 'verified') reasons.push('Your account must be verified');
+  if (!p.is_active) reasons.push('Your account is suspended');
+  if (p.rating_count > 0 && p.rating_avg < eligibility.minRatingAvg) reasons.push(`Your rolling rating must be at least ${eligibility.minRatingAvg}★`);
+  if (p.open_disputes > eligibility.maxOpenDisputes) reasons.push('Resolve your open disputes first');
+  if (eligibility.noOpenFlags && p.open_flags > 0) reasons.push('Your account has an open review flag');
   return { eligible: reasons.length === 0, reasons };
 }
 

@@ -29,6 +29,10 @@ const schema = z.object({
   WHATSAPP_API_VERSION: z.string().default('v21.0'),
   WHATSAPP_DISPLAY_NUMBER: optional,
 
+  EMAIL_PROVIDER: z.enum(['log', 'sendgrid']).default('log'),
+  SENDGRID_API_KEY: optional,
+  EMAIL_FROM: z.string().default('HANDIWORK-DECK <no-reply@handiwork-deck.app>'),
+
   STORAGE_DRIVER: z.enum(['s3', 'cloudinary']).default('s3'),
   AWS_REGION: z.string().default('eu-west-1'),
   S3_BUCKET: optional,

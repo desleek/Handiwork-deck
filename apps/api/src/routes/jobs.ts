@@ -12,6 +12,7 @@ import { afterTransition, type JobRecord, newJobRef, transitionJob } from '../se
 import { assignQuote, writeQuoteItems } from '../services/jobs/quotes';
 import { findMatchingTechnicians } from '../services/matching';
 import { waDeepLink } from '../services/messaging/whatsapp';
+import { customerTrust, effectiveRateBps, recomputeTechnicianRating } from '../services/ratings';
 import { pendingReviewJobs } from '../services/reviews';
 
 export const jobsRouter = Router();
@@ -115,7 +116,7 @@ jobsRouter.post('/jobs', authenticate, requireUser('customer'), async (req, res)
       [job.id, tech.user_id, tech.base_rate_minor, b.currency, 'Instant booking at listed rate'],
       db,
     );
-    await writeQuoteItems(db, { quoteId: quote.id, jobId: job.id, technicianId: tech.user_id, currency: b.currency, revision: 1 }, [
+    await writeQuoteItems(db, { quoteId: quote.id, jobId: job.id, technicianId: tech.user_id, currency: b.currency, revision: 1, performanceAdjustmentBps: await effectiveRateBps(tech.user_id, db) }, [
       { kind: 'labor', description: `${category.name} — listed rate (instant booking)`, quantity: 1, unitPriceMinor: tech.base_rate_minor },
     ]);
     const assigned = await assignQuote(db, job.id, quote.id, { id: null, role: 'system' }, 'instant booking');
@@ -170,7 +171,7 @@ jobsRouter.get('/jobs', authenticate, requireUser(), async (req, res) => {
     if (user.role !== 'technician') throw forbidden('Only technicians have a job feed');
     const rows = await query(
       `SELECT * FROM (
-         SELECT j.id, j.ref, j.title, j.description, j.address, j.lat, j.lng, j.status, j.scheduled_for, j.booking_mode,
+         SELECT j.id, j.ref, j.customer_id, j.title, j.description, j.address, j.lat, j.lng, j.status, j.scheduled_for, j.booking_mode,
                 j.budget_minor, j.currency, j.category_id, c.name AS category_name, c.icon AS category_icon, j.created_at,
                 j.target_technician_id = $1 AS is_request_to_me, j.request_accepted_at, j.match_radius_km, tp.service_radius_km,
                 2 * 6371 * asin(sqrt(power(sin(radians(tp.base_lat - j.lat) / 2), 2) +
@@ -189,7 +190,10 @@ jobsRouter.get('/jobs', authenticate, requireUser(), async (req, res) => {
        ORDER BY f.is_request_to_me DESC, f.created_at DESC LIMIT $2`,
       [user.id, q.limit],
     );
-    res.json({ jobs: rows });
+    // Section 7: agreement-compliance rating and completion badge, visible before accepting.
+    const trust = new Map<string, Awaited<ReturnType<typeof customerTrust>>>();
+    for (const r of rows) if (!trust.has(r.customer_id)) trust.set(r.customer_id, await customerTrust(r.customer_id));
+    res.json({ jobs: rows.map(({ customer_id, ...r }) => ({ ...r, customer: trust.get(customer_id) })) });
     return;
   }
 
@@ -251,8 +255,11 @@ jobsRouter.get('/jobs/:id', authenticate, requireUser(), async (req, res) => {
     ),
     query('SELECT from_status, to_status, note, created_at FROM job_status_history WHERE job_id = $1 ORDER BY created_at', [job.id]),
     one('SELECT overall, scores, comment, created_at FROM reviews WHERE job_id = $1', [job.id]),
-    // Technicians see how well the customer has kept to past agreements.
-    one(`SELECT split_part(full_name, ' ', 1) AS first_name, customer_type, customer_rating_avg::float8 AS rating_avg, customer_rating_count AS rating_count FROM users WHERE id = $1`, [job.customer_id]),
+    // Technicians see how well the customer has kept to past agreements, before they accept.
+    one(`SELECT split_part(full_name, ' ', 1) AS first_name, customer_type FROM users WHERE id = $1`, [job.customer_id]).then(async (c) => ({
+      ...c,
+      ...(await customerTrust(job.customer_id)),
+    })),
     one('SELECT overall, scores, comment, created_at FROM customer_ratings WHERE job_id = $1', [job.id]),
   ]);
   const isParty = job.customer_id === user.id || job.technician_id === user.id;
@@ -299,28 +306,34 @@ const ReviewBody = z.object({
   comment: z.string().trim().min(REVIEW_MIN_COMMENT_LENGTH, `Write at least ${REVIEW_MIN_COMMENT_LENGTH} characters`).max(2000),
 });
 
-/** Mandatory after every completed job: a score for every category plus a written review. */
+/**
+ * Mandatory after every completed job: a score for all seven categories plus a
+ * written review. Only verified, completed, platform-paid bookings can be reviewed.
+ */
 jobsRouter.post('/jobs/:id/review', authenticate, requireUser('customer'), async (req, res) => {
   const jobId = parse(z.uuid(), req.params.id);
   const b = parse(ReviewBody, req.body);
   const customer = currentUser(req);
   const overall = overallRating(b.scores);
   const review = await tx(async (db) => {
-    const job = await one('SELECT * FROM jobs WHERE id = $1 AND customer_id = $2', [jobId, customer.id], db);
+    const job = await one(
+      `SELECT j.*, tp.verification_status,
+              EXISTS (SELECT 1 FROM payments p WHERE p.job_id = j.id AND p.status IN ('succeeded', 'partially_refunded')) AS platform_paid
+         FROM jobs j LEFT JOIN technician_profiles tp ON tp.user_id = j.technician_id
+        WHERE j.id = $1 AND j.customer_id = $2`,
+      [jobId, customer.id],
+      db,
+    );
     if (!job) throw notFound('Job');
-    if (!['completed', 'paid'].includes(job.status) || !job.technician_id) throw conflict('You can review a job once it is completed');
+    if (job.status !== 'paid' || !job.platform_paid || !job.technician_id) throw conflict('You can review a job once it is completed and paid through the platform');
+    if (job.verification_status !== 'verified') throw conflict('Reviews are only accepted for verified technicians');
     const review = await one(
       `INSERT INTO reviews (job_id, reviewer_id, reviewee_id, rating, overall, scores, comment)
        VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
       [jobId, customer.id, job.technician_id, Math.round(overall), overall, b.scores, b.comment],
       db,
     );
-    await db.query(
-      `UPDATE technician_profiles tp SET rating_count = s.n, rating_avg = s.avg
-         FROM (SELECT count(*) AS n, round(avg(overall), 2) AS avg FROM reviews WHERE reviewee_id = $1) s
-        WHERE tp.user_id = $1`,
-      [job.technician_id],
-    );
+    await recomputeTechnicianRating(job.technician_id, db);
     return review;
   });
   res.status(201).json({ review });

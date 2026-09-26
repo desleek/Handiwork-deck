@@ -2,7 +2,10 @@ import { Worker } from 'bullmq';
 import { pool } from './db/pool';
 import { logger } from './lib/logger';
 import { processEscalation } from './queues/escalations';
-import { type EscalationJobData, jobs, type NotificationJobData, type PayoutJobData, QUEUE_NAMES, redisConnection } from './queues/index';
+import { Queue } from 'bullmq';
+import { type ChallengeStepData, type EscalationJobData, jobs, type NotificationJobData, type PayoutJobData, QUEUE_NAMES, redisConnection } from './queues/index';
+import { processChallengeStep } from './services/priceChallenges';
+import { runRateCycle } from './services/rateAdjustment';
 import { processPayout } from './services/payouts';
 import { pushToUser } from './services/notifications/push';
 
@@ -15,7 +18,13 @@ const workers = [
     concurrency: 20,
   }),
   new Worker<PayoutJobData>(QUEUE_NAMES.payouts, (job) => processPayout(job.data.payoutId), { connection, concurrency: 2 }),
+  new Worker<ChallengeStepData>(QUEUE_NAMES.challenges, (job) => processChallengeStep(job.data), { connection, concurrency: 5 }),
+  // Section 7a: hourly sweep recalculates technicians whose rate cycle (default 14 days) has elapsed.
+  new Worker(QUEUE_NAMES.maintenance, async (job) => (job.name === 'rate-cycle' ? runRateCycle() : undefined), { connection, concurrency: 1 }),
 ];
+
+const maintenance = new Queue(QUEUE_NAMES.maintenance, { connection });
+await maintenance.upsertJobScheduler('rate-cycle', { every: 60 * 60 * 1000 }, { name: 'rate-cycle' });
 
 for (const w of workers) {
   w.on('failed', (job, err) => logger.error({ queue: w.name, jobId: job?.id, err }, 'queue job failed'));
@@ -26,6 +35,7 @@ logger.info('worker started');
 async function shutdown() {
   logger.info('worker shutting down');
   await Promise.all(workers.map((w) => w.close()));
+  await maintenance.close();
   await jobs().close();
   await pool.end();
   connection.disconnect();

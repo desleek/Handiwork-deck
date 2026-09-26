@@ -9,3 +9,4 @@ export * from './contact';
 export * from './quotes';
 export * from './payments';
 export * from './customerRatings';
+export * from './priceChallenge';

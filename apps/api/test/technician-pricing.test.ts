@@ -230,22 +230,6 @@ describe.skipIf(!hasDb)('Sections 4, 5, 5a: technician flow, pricing model, Dema
       await request(app).put('/v1/admin/settings/commission').set(as(U.admin)).send({ value: { laborBps: 1800, markupBps: 2000 } });
       await request(app).post(`/v1/jobs/${job.id}/status`).set(as(U.cust)).send({ status: 'cancelled' });
     });
-
-    it('a price challenge never eats into the base cost of parts', async () => {
-      const job = await postJob();
-      const q = (await quote(job.id, [labor(200_000), part('Valve', 1_000_000, 1000)])).body.quote; // total 1.3m
-      const c = await request(app).post(`/v1/jobs/${job.id}/quotes/${q.id}/counter`).set(as(U.cust)).send({ kind: 'price_challenge', proposedTotalMinor: 1_050_000, message: 'Market rate' });
-      const r = await request(app).post(`/v1/jobs/${job.id}/quotes/${q.id}/counters/${c.body.counter.id}/respond`).set(as(U.tech)).send({ decision: 'accept' });
-      expect(r.status).toBe(200);
-      const inv = (await request(app).get(`/v1/jobs/${job.id}/invoice`).set(as(U.tech))).body.invoice;
-      expect(inv.adjustments.map((a: { appliesTo: string; totalMinor: number }) => [a.appliesTo, a.totalMinor])).toEqual([
-        ['labor', -200_000],
-        ['markup', -50_000],
-      ]);
-      expect(inv.totals).toMatchObject({ labor: 0, partsBase: 1_000_000, markup: 50_000, total: 1_050_000 });
-      expect(inv.commission.platformFee).toBe(10_000); // 20% of the remaining 50k markup
-      await request(app).post(`/v1/jobs/${job.id}/status`).set(as(U.cust)).send({ status: 'cancelled' });
-    });
   });
 
   // ------------------------------------------------------------------ Section 5a Demand Notice
@@ -313,9 +297,10 @@ describe.skipIf(!hasDb)('Sections 4, 5, 5a: technician flow, pricing model, Dema
     it('shows earnings split and the performance multiplier with next-tier guidance', async () => {
       const r = await request(app).get('/v1/technicians/me/earnings').set(as(U.tech));
       expect(r.body.earnings[0]).toMatchObject({ currency: 'NGN', jobs_paid: 1, gross_minor: 7_720_000, commission_minor: 330_000, net_minor: 7_390_000, labor_minor: 500_000, parts_reimbursed_minor: 6_020_000, markup_minor: 1_200_000 });
-      expect(r.body.performance.current).toMatchObject({ tier: 'new', multiplier: 1 });
-      expect(r.body.performance.actions[0].action).toMatch(/Complete 2 more jobs/);
-      expect(r.body.performance.tiers.map((t: { tier: string }) => t.tier)).toEqual(['standard', 'trusted', 'elite']);
+      // No cycle has run yet: standard labor rate, but the rolling 5★ rating projects the top tier.
+      expect(r.body.performance.current).toMatchObject({ multiplier: 1, tierStars: null });
+      expect(r.body.performance).toMatchObject({ rollingRating: 5, projected: { stars: 5, adjustmentBps: 1000 }, next: null, cycleDays: 14 });
+      expect(r.body.performance.tiers.map((t: { stars: number }) => t.stars)).toEqual([5, 4, 3, 2, 1]);
     });
 
     it('sells boosts and priority alerts to eligible technicians, paid from the wallet', async () => {
@@ -377,14 +362,17 @@ describe.skipIf(!hasDb)('Sections 4, 5, 5a: technician flow, pricing model, Dema
   // ------------------------------------------------------------------ customer ratings
   describe('technicians rate customers on agreement compliance', () => {
     it('requires the right categories and shows the result to technicians', async () => {
-      const bad = await request(app).post(`/v1/jobs/${id.pricedJob}/customer-rating`).set(as(U.tech)).send({ scores: { payment: 5 } });
+      const bad = await request(app).post(`/v1/jobs/${id.pricedJob}/customer-rating`).set(as(U.tech)).send({ scores: { on_site: 5 } });
       expect(bad.status).toBe(400);
-      const ok = await request(app).post(`/v1/jobs/${id.pricedJob}/customer-rating`).set(as(U.tech)).send({ scores: { payment: 5, scope: 4, conduct: 5 }, comment: 'Paid promptly' });
+      const ok = await request(app)
+        .post(`/v1/jobs/${id.pricedJob}/customer-rating`)
+        .set(as(U.tech))
+        .send({ scores: { on_site: 5, access: 4, paid_on_platform: 5, conduct: 5 }, comment: 'Paid promptly' });
       expect(ok.status).toBe(201);
-      expect(ok.body.rating.overall).toBe(4.67);
+      expect(ok.body.rating.overall).toBe(4.75);
       const job = await postJob();
       const view = await request(app).get(`/v1/jobs/${job.id}`).set(as(U.tech));
-      expect(view.body.customer).toMatchObject({ first_name: 'Ada', rating_avg: 4.67, rating_count: 1 });
+      expect(view.body.customer).toMatchObject({ first_name: 'Ada', ratingAvg: 4.75, ratingCount: 1, completionBadge: false });
       expect((await request(app).get(`/v1/jobs/${job.id}`).set(as(U.cust))).body.customer).toBeUndefined();
     });
   });

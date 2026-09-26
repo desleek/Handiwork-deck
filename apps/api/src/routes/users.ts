@@ -3,6 +3,7 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { one, query } from '../db/pool';
 import { conflict } from '../lib/errors';
+import { customerTrust } from '../services/ratings';
 import { pendingReviewJobs } from '../services/reviews';
 import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
@@ -43,8 +44,9 @@ usersRouter.post('/auth/register', authenticate, async (req, res) => {
 });
 
 usersRouter.get('/me', authenticate, requireUser(), async (req, res) => {
-  const user = await one(`SELECT ${USER_COLUMNS} FROM users WHERE id = $1`, [currentUser(req).id]);
-  res.json({ user });
+  const me = currentUser(req);
+  const user = await one(`SELECT ${USER_COLUMNS} FROM users WHERE id = $1`, [me.id]);
+  res.json({ user: me.role === 'customer' ? { ...user, trust: await customerTrust(me.id) } : user });
 });
 
 const UpdateMe = z.object({

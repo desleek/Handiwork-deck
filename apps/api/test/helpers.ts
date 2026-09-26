@@ -27,6 +27,6 @@ export const laborQuote = (amountMinor: number, extra: Record<string, unknown> =
   ...extra,
 });
 
-export const fullScores = (n = 5) => ({ quality: n, punctuality: n, communication: n, value: n, professionalism: n });
+export const fullScores = (n = 5) => ({ competence: n, punctuality: n, professionalism: n, courtesy: n, timeline: n, transparency: n, quality: n });
 
 export const bearer = (uid: string, phone?: string) => `Bearer dev:${uid}${phone ? `:${phone}` : ''}`;

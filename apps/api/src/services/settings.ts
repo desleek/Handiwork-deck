@@ -1,8 +1,28 @@
-import { DEFAULT_COMMISSION, DEFAULT_LABOR_ONLY_COOLDOWN_DAYS, DEFAULT_MARKUP_CAP_BPS, DEFAULT_RECEIPT_THRESHOLD_MINOR } from '@handiwork/shared';
+import {
+  CHALLENGE_TIMEOUT_ACTIONS,
+  DEFAULT_COMMISSION,
+  DEFAULT_LABOR_ONLY_COOLDOWN_DAYS,
+  DEFAULT_MARKUP_CAP_BPS,
+  DEFAULT_RATE_CYCLE_DAYS,
+  DEFAULT_RATE_TIERS,
+  DEFAULT_RECEIPT_THRESHOLD_MINOR,
+  FAST_TRACK_CHALLENGE_TIMELINE,
+  STANDARD_CHALLENGE_TIMELINE,
+} from '@handiwork/shared';
 import { z } from 'zod';
 import { type Queryable, pool, query } from '../db/pool';
 
 const money = z.record(z.string().length(3), z.number().int().min(0));
+const hours = z.number().positive().max(24 * 30);
+const timeline = z
+  .object({
+    responseDueHours: hours,
+    remindersUntilHours: hours,
+    reminderEveryHours: hours,
+    adminEscalationHours: hours,
+    finalActionHours: hours,
+  })
+  .refine((t) => t.responseDueHours <= t.remindersUntilHours && t.adminEscalationHours <= t.finalActionHours, 'Timeline steps are out of order');
 
 /** Every admin-configurable platform setting, with its validation schema and default. */
 export const SETTINGS = {
@@ -41,11 +61,12 @@ export const SETTINGS = {
           radiusFactor: z.number().min(1).max(10).optional(),
         }),
       ),
+      /** Section 7a: the same rolling rating used for the labor rate gates boost eligibility. */
       eligibility: z.object({
         requireVerified: z.boolean(),
         minRatingAvg: z.number().min(0).max(5),
         maxOpenDisputes: z.number().int().min(0),
-        blockedTiers: z.array(z.enum(['new', 'elite', 'trusted', 'standard', 'under_review'])),
+        noOpenFlags: z.boolean(),
       }),
     }),
     default: {
@@ -54,8 +75,47 @@ export const SETTINGS = {
         boost_30d: { kind: 'boost', label: 'Visibility boost — 30 days', days: 30, price: { NGN: 1_500_000, USD: 1_500 }, priority: 10 },
         alerts_30d: { kind: 'alerts', label: 'Priority job alerts — 30 days (2× reach)', days: 30, price: { NGN: 300_000, USD: 300 }, radiusFactor: 2 },
       },
-      eligibility: { requireVerified: true, minRatingAvg: 3.5, maxOpenDisputes: 0, blockedTiers: ['under_review'] },
+      eligibility: { requireVerified: true, minRatingAvg: 3.5, maxOpenDisputes: 0, noOpenFlags: true },
     },
+  },
+  /** Section 6b: rejecting labor-only requests in a category the technician declared "Accept" for. */
+  labor_only_rejections: {
+    schema: z.object({
+      cap: z.number().int().min(0),
+      windowDays: z.number().int().min(1).max(3650),
+      penaltyPoints: z.number().min(0.01).max(5),
+      penaltyDays: z.number().int().min(1).max(3650),
+    }),
+    default: { cap: 3, windowDays: 90, penaltyPoints: 0.25, penaltyDays: 90 },
+  },
+  /** Section 6c: price-challenge escalation timelines and the uniform timeout action. */
+  price_challenge: {
+    schema: z.object({ timeoutAction: z.enum(CHALLENGE_TIMEOUT_ACTIONS), standard: timeline, fastTrack: timeline }),
+    default: { timeoutAction: 'auto_approve' as const, standard: STANDARD_CHALLENGE_TIMELINE, fastTrack: FAST_TRACK_CHALLENGE_TIMELINE },
+  },
+  /** Section 7: weighted-recent public rating. */
+  rating: { schema: z.object({ halfLifeDays: z.number().int().min(7).max(3650) }), default: { halfLifeDays: 180 } },
+  /** Section 7a: labor rate adjustment tiers and recalculation cycle. */
+  rate_adjustment: {
+    schema: z.object({
+      cycleDays: z.number().int().min(1).max(365),
+      holdAnomalousSwings: z.boolean(),
+      tiers: z
+        .array(
+          z.object({
+            stars: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(5)]),
+            minRating: z.number().min(0).max(5),
+            adjustmentBps: z.number().int().min(-5000).max(5000),
+          }),
+        )
+        .length(5),
+    }),
+    default: { cycleDays: DEFAULT_RATE_CYCLE_DAYS, holdAnomalousSwings: true, tiers: DEFAULT_RATE_TIERS },
+  },
+  /** Section 7: platform completion badge for customers. */
+  completion_badge: {
+    schema: z.object({ minPaidJobs: z.number().int().min(1), minCompletionRate: z.number().min(0).max(1) }),
+    default: { minPaidJobs: 3, minCompletionRate: 0.9 },
   },
 } as const;
 

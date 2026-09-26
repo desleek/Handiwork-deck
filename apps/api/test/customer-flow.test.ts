@@ -174,7 +174,7 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
         category: { id: plumbing, name: 'Plumbing', icon: 'water' },
         startingPrice: { amountMinor: 500_000, currency: 'NGN' },
         laborOnly: 'decline',
-        performance: { multiplier: 1, tier: 'new' },
+        performance: { multiplier: 1, tierStars: null },
       });
 
       // Radius filter: Chidi (~33 km) drops out at 10 km.
@@ -209,7 +209,7 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       const p = await request(app).get(`/v1/technicians/${id.alice}`).set(as(U.cust.uid));
       expect(p.body.technician.portfolio).toHaveLength(5);
       expect(p.body.technician.certifications[0]).toMatchObject({ title: 'COREN Plumbing Cert', is_verified: true });
-      expect(p.body.technician).toMatchObject({ performance: { tier: 'new' } });
+      expect(p.body.technician).toMatchObject({ performance: { tierStars: null } });
       expect(p.body.technician.services[0].labor_only_policy).toBe('accept');
     });
   });
@@ -272,10 +272,9 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
     it('validates counters against the quote and the technician stance', async () => {
       const c = (quoteId: string, body: object) => request(app).post(`/v1/jobs/${jobId}/quotes/${quoteId}/counter`).set(as(U.cust.uid)).send(body);
       expect((await c(bolaQuote, { kind: 'labor_only' })).body.error.message).toMatch(/no labor-only/);
-      expect((await c(aliceQuote, { kind: 'price_challenge', proposedTotalMinor: 6_000_000 })).status).toBe(400); // needs a reason
-      expect((await c(aliceQuote, { kind: 'price_challenge', proposedTotalMinor: 9_000_000, message: 'x' })).status).toBe(409);
+      // Parts price challenges are a separate evidence-backed flow, not a counter.
+      expect((await c(aliceQuote, { kind: 'price_challenge', proposedTotalMinor: 6_000_000, message: 'x' })).status).toBe(400);
       expect((await c(aliceQuote, { kind: 'labor_negotiation', proposedLaborMinor: 2_500_000 })).status).toBe(409);
-      expect((await c(aliceQuote, { kind: 'price_challenge', proposedTotalMinor: 4_000_000, message: 'below parts cost' })).status).toBe(409);
     });
 
     it('lets the technician decline a counter, restoring the original quote', async () => {
@@ -291,7 +290,7 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
     });
 
     it('revising a quote supersedes a pending counter', async () => {
-      const c = await request(app).post(`/v1/jobs/${jobId}/quotes/${bolaQuote}/counter`).set(as(U.cust.uid)).send({ kind: 'price_challenge', proposedTotalMinor: 6_500_000, message: 'Market price is lower' });
+      const c = await request(app).post(`/v1/jobs/${jobId}/quotes/${bolaQuote}/counter`).set(as(U.cust.uid)).send({ kind: 'labor_negotiation', proposedLaborMinor: 1_800_000 });
       const rev = await request(app).put(`/v1/jobs/${jobId}/quotes/${bolaQuote}`).set(as(U.bola.uid)).send({ items: items.slice(0, 2) });
       expect(rev.body.quote).toMatchObject({ revision: 2, status: 'pending', amount_minor: 6_500_000 });
       const d = await request(app).get(`/v1/jobs/${jobId}`).set(as(U.cust.uid));
@@ -311,10 +310,10 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       await request(app).post(`/v1/jobs/${jobId}/status`).set(as(U.cust.uid)).send({ status: 'cancelled' });
     });
 
-    it('a price challenge accepted adds an adjustment line', async () => {
+    it('an accepted labor negotiation adds a job-only labor adjustment line', async () => {
       const j = (await postJob(U.cust.uid)).body.job.id;
       const q = (await request(app).post(`/v1/jobs/${j}/quotes`).set(as(U.bola.uid)).send({ items })).body.quote.id;
-      const c = await request(app).post(`/v1/jobs/${j}/quotes/${q}/counter`).set(as(U.cust.uid)).send({ kind: 'price_challenge', proposedTotalMinor: 7_000_000, message: 'Budget is 70k' });
+      const c = await request(app).post(`/v1/jobs/${j}/quotes/${q}/counter`).set(as(U.cust.uid)).send({ kind: 'labor_negotiation', proposedLaborMinor: 2_000_000 });
       const r = await request(app).post(`/v1/jobs/${j}/quotes/${q}/counters/${c.body.counter.id}/respond`).set(as(U.bola.uid)).send({ decision: 'accept' });
       expect(r.body.job.budget_minor).toBe(7_000_000);
       const d = await request(app).get(`/v1/jobs/${j}`).set(as(U.cust.uid));
@@ -397,20 +396,20 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       expect(blocked.body.error.details.jobs[0].id).toBe(id.paidJob);
       expect((await request(app).get('/v1/me/pending-reviews').set(as(U.cust.uid))).body.jobs).toHaveLength(1);
 
-      const partial = await request(app).post(`/v1/jobs/${id.paidJob}/review`).set(as(U.cust.uid)).send({ scores: { quality: 5 }, comment: 'Great job overall' });
+      const partial = await request(app).post(`/v1/jobs/${id.paidJob}/review`).set(as(U.cust.uid)).send({ scores: { quality: 5, competence: 5 }, comment: 'Great job overall' });
       expect(partial.status).toBe(400);
       const short = await request(app).post(`/v1/jobs/${id.paidJob}/review`).set(as(U.cust.uid)).send({ scores: fullScores(4), comment: 'ok' });
       expect(short.status).toBe(400);
       const ok = await request(app)
         .post(`/v1/jobs/${id.paidJob}/review`)
         .set(as(U.cust.uid))
-        .send({ scores: { quality: 5, punctuality: 5, communication: 4, value: 4, professionalism: 5 }, comment: 'Neat work, arrived on time' });
+        .send({ scores: { competence: 5, punctuality: 5, professionalism: 5, courtesy: 4, timeline: 4, transparency: 5, quality: 5 }, comment: 'Neat work, arrived on time' });
       expect(ok.status).toBe(201);
-      expect(ok.body.review.overall).toBe(4.6);
+      expect(ok.body.review.overall).toBe(4.71);
       expect((await postJob(U.cust.uid)).status).toBe(201);
 
       const p = await request(app).get(`/v1/technicians/${id.alice}`).set(as(U.cust2.uid));
-      expect(p.body.technician.categoryScores).toMatchObject({ quality: 5, communication: 4 });
+      expect(p.body.technician.categoryScores).toMatchObject({ quality: 5, courtesy: 4 });
       expect(p.body.technician.reviews[0]).toMatchObject({ comment: 'Neat work, arrived on time', category_name: 'Plumbing' });
     });
 

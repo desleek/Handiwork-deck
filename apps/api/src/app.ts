@@ -6,6 +6,7 @@ import { logger } from './lib/logger';
 import { errorHandler, notFoundHandler } from './middleware/errors';
 import { adminRouter } from './routes/admin';
 import { adminPricingRouter } from './routes/adminPricing';
+import { adminQualityRouter } from './routes/adminQuality';
 import { adminTaxonomyRouter } from './routes/adminTaxonomy';
 import { categoriesRouter } from './routes/categories';
 import { chatRouter } from './routes/chat';
@@ -14,6 +15,7 @@ import { quotesRouter } from './routes/quotes';
 import { adsRouter } from './routes/ads';
 import { healthRouter } from './routes/health';
 import { jobRequestsRouter } from './routes/jobRequests';
+import { priceChallengesRouter } from './routes/priceChallenges';
 import { jobsRouter } from './routes/jobs';
 import { technicianBusinessRouter } from './routes/technicianBusiness';
 import { paymentsRouter, paymentWebhookRouter } from './routes/payments';
@@ -45,6 +47,7 @@ export function createApp() {
     jobsRouter,
     jobRequestsRouter,
     quotesRouter,
+    priceChallengesRouter,
     chatRouter,
     paymentsRouter,
     uploadsRouter,
@@ -52,6 +55,7 @@ export function createApp() {
     adminRouter,
     adminTaxonomyRouter,
     adminPricingRouter,
+    adminQualityRouter,
   );
 
   app.use(notFoundHandler);

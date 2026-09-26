@@ -1,4 +1,4 @@
-import { type AdjustmentTarget, priceLine, type QuoteItemInput, quoteTotals } from '@handiwork/shared';
+import { adjustLabor, type AdjustmentTarget, priceLine, type QuoteItemInput, quoteTotals } from '@handiwork/shared';
 import type pg from 'pg';
 import { one } from '../../db/pool';
 import { badRequest, conflict, HttpError, notFound } from '../../lib/errors';
@@ -19,6 +19,8 @@ interface WriteContext {
   technicianId: string;
   currency: string;
   revision: number;
+  /** Section 7a labor rate adjustment snapshotted on the quote when first submitted. */
+  performanceAdjustmentBps: number;
 }
 
 /**
@@ -79,6 +81,16 @@ export async function writeQuoteItems(db: pg.PoolClient, ctx: WriteContext, item
       filed++;
     }
   }
+  // Section 7a: the performance adjustment is its own disclosed line on labor only.
+  if (ctx.performanceAdjustmentBps) {
+    const laborBase = items.filter((i) => i.kind === 'labor').reduce((sum, i) => sum + priceLine(i).totalMinor, 0);
+    const delta = adjustLabor(laborBase, ctx.performanceAdjustmentBps) - laborBase;
+    if (delta) {
+      const pct = ctx.performanceAdjustmentBps / 100;
+      await addAdjustment(db, ctx.quoteId, 'labor', delta, `Performance rate adjustment (${pct > 0 ? '+' : ''}${pct}%)`);
+    }
+  }
+  await db.query('UPDATE quotes SET performance_adjustment_bps = $2 WHERE id = $1', [ctx.quoteId, ctx.performanceAdjustmentBps]);
   await refreshQuoteTotals(db, ctx.quoteId);
   return filed;
 }
@@ -137,6 +149,7 @@ export async function assignQuote(db: pg.PoolClient, jobId: string, quoteId: str
   );
   await db.query(`UPDATE quote_counters SET status = 'superseded' WHERE status = 'pending' AND quote_id IN (SELECT id FROM quotes WHERE job_id = $1 AND id <> $2)`, [jobId, quoteId]);
   await db.query(`UPDATE cap_exception_requests SET status = 'withdrawn' WHERE job_id = $1 AND quote_id <> $2 AND status = 'pending'`, [jobId, quoteId]);
+  await db.query(`UPDATE price_challenges SET status = 'superseded', resolved_at = now() WHERE job_id = $1 AND quote_id <> $2 AND status = 'pending'`, [jobId, quoteId]);
   await ensureConversation(db, jobId, job.customer_id, quote.technician_id);
   // Chats with technicians who weren't hired are closed.
   await db.query('UPDATE conversations SET is_open = (technician_id = $2) WHERE job_id = $1', [jobId, quote.technician_id]);

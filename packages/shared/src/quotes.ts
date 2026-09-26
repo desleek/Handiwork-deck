@@ -130,14 +130,15 @@ export const LABOR_ONLY_POLICY_LABEL: Record<LaborOnlyPolicy, string> = {
   accept: 'Accepts labor-only (you supply materials)',
   decline: 'Supplies own materials — no labor-only',
 };
-export const DEFAULT_LABOR_ONLY_COOLDOWN_DAYS = 90;
+export const DEFAULT_LABOR_ONLY_COOLDOWN_DAYS = 30;
 
 // ---------------------------------------------------------------- counters
 /**
- * Customer responses to an itemized quote (besides approving it):
+ * Customer counters on labor (Section 6b/6d). Price challenges on parts (6c) are a
+ * separate flow with seller evidence and an escalation timeline — see priceChallenge.ts.
  *  - labor_only: "I'll supply the materials" — drop all part lines
- *  - price_challenge: propose a lower total, with a reason (never below the parts' base cost)
- *  - labor_negotiation: propose a lower labor amount; parts unchanged
+ *  - labor_negotiation: propose a lower labor amount for this job only; parts unchanged
+ *  - price_challenge: legacy total-price challenge (kept for existing data)
  */
 export const COUNTER_KINDS = ['labor_only', 'price_challenge', 'labor_negotiation'] as const;
 export type CounterKind = (typeof COUNTER_KINDS)[number];

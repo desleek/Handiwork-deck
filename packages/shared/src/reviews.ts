@@ -1,13 +1,23 @@
-/** Every review scores the technician on each of these; all are mandatory. */
-export const REVIEW_CATEGORIES = ['quality', 'punctuality', 'communication', 'value', 'professionalism'] as const;
+/** Section 7: every customer review scores the technician on each of these; all are mandatory. */
+export const REVIEW_CATEGORIES = [
+  'competence',
+  'punctuality',
+  'professionalism',
+  'courtesy',
+  'timeline',
+  'transparency',
+  'quality',
+] as const;
 export type ReviewCategory = (typeof REVIEW_CATEGORIES)[number];
 
 export const REVIEW_CATEGORY_LABEL: Record<ReviewCategory, string> = {
-  quality: 'Quality of work',
+  competence: 'Competence',
   punctuality: 'Punctuality',
-  communication: 'Communication',
-  value: 'Value for money',
   professionalism: 'Professionalism',
+  courtesy: 'Courtesy',
+  timeline: 'Delivery timeline',
+  transparency: 'Transparency & pricing fairness',
+  quality: 'Quality of work',
 };
 
 /** Minimum length of the written part of a review. */
@@ -22,9 +32,27 @@ export function overallRating(scores: ReviewScores): number {
   return Math.round((vals.reduce((a, b) => a + b, 0) / vals.length) * 100) / 100;
 }
 
-/** Short tags shown on a review, e.g. "Punctuality 5★". Only notable scores (≥4 or ≤2) are tagged. */
-export function reviewTags(scores: Partial<ReviewScores>): string[] {
+/** Short tags shown on a public review, e.g. "Punctuality 5★". Only notable scores (≥4 or ≤2) are tagged. */
+export function reviewTags(scores: Partial<Record<string, number>>): string[] {
   return REVIEW_CATEGORIES.filter((c) => scores[c] !== undefined && (scores[c]! >= 4 || scores[c]! <= 2)).map(
     (c) => `${REVIEW_CATEGORY_LABEL[c]} ${scores[c]}★`,
   );
+}
+
+/**
+ * Weighted-recent average: each rating's weight halves every `halfLifeDays`, so
+ * recent work counts more. Used both for the public rating and for the Section 7a
+ * labor rate adjustment.
+ */
+export function weightedRecentAverage(ratings: { value: number; at: Date }[], halfLifeDays: number, now = new Date()): number | null {
+  if (!ratings.length) return null;
+  let sum = 0;
+  let weights = 0;
+  for (const r of ratings) {
+    const ageDays = Math.max(0, (now.getTime() - r.at.getTime()) / 86_400_000);
+    const w = Math.pow(0.5, ageDays / halfLifeDays);
+    sum += r.value * w;
+    weights += w;
+  }
+  return Math.round((sum / weights) * 100) / 100;
 }

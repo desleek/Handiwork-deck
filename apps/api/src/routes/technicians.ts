@@ -6,7 +6,7 @@ import { badRequest, conflict, HttpError, notFound } from '../lib/errors';
 import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 import { getProvider, providerForCurrency } from '../services/payments/index';
-import { performanceFor } from '../services/performance';
+import { performanceFor } from '../services/ratings';
 import { getSetting } from '../services/settings';
 
 /** Section 3: technician profiles show at most this many portfolio images. */
@@ -359,8 +359,12 @@ techniciansRouter.get('/technicians/:id', authenticate, requireUser(), async (re
   if (!profile) throw notFound('Technician');
   const [services, portfolio, reviews, certifications, categoryScores, performance] = await Promise.all([
     query(
-      `SELECT c.id, c.name, c.segment, c.icon, ts.base_rate_minor, ts.currency, ts.labor_only_policy
+      `SELECT c.id, c.name, c.segment, c.icon, ts.base_rate_minor, ts.currency, ts.labor_only_policy,
+              -- Section 7a: the publicly displayed standard rate includes the performance adjustment.
+              round(ts.base_rate_minor * (1 + COALESCE(tp.rate_override_bps, tp.rate_adjustment_bps) / 10000.0))::bigint AS standard_rate_minor,
+              (SELECT max(d.declared_at) FROM technician_labor_only_declarations d WHERE d.technician_id = ts.technician_id AND d.category_id = ts.category_id) AS labor_only_declared_at
          FROM technician_services ts JOIN service_categories c ON c.id = ts.category_id
+         JOIN technician_profiles tp ON tp.user_id = ts.technician_id
         WHERE ts.technician_id = $1 AND c.is_active ORDER BY c.sort_order`,
       [id],
     ),
@@ -397,7 +401,7 @@ techniciansRouter.get('/technicians/:id', authenticate, requireUser(), async (re
       categoryScores,
       performance: performance.get(id),
       availability: { timezone: availability.timezone, availableNow: availability.availableNow, weekly: availability.weekly },
-      reviews: reviews.map((r) => ({ ...r, tags: reviewTags(r.scores) })),
+      reviews: reviews.map((r: any) => ({ ...r, tags: reviewTags(r.scores) })),
     },
   });
 });

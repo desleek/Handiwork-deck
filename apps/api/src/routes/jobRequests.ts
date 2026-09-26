@@ -1,4 +1,4 @@
-import { CUSTOMER_RATING_CATEGORIES, requiredCustomerRatingCategories } from '@handiwork/shared';
+import { CUSTOMER_RATING_CATEGORIES } from '@handiwork/shared';
 import { Router } from 'express';
 import { z } from 'zod';
 import { env } from '../config/env';
@@ -132,11 +132,17 @@ jobRequestsRouter.get('/jobs/:id/audit', authenticate, requireUser(), async (req
 });
 
 const CustomerRatingBody = z.object({
-  scores: z.partialRecord(z.enum(CUSTOMER_RATING_CATEGORIES), z.number().int().min(1).max(5)),
+  scores: z.object(Object.fromEntries(CUSTOMER_RATING_CATEGORIES.map((c) => [c, z.number().int().min(1).max(5)])) as Record<
+    (typeof CUSTOMER_RATING_CATEGORIES)[number],
+    z.ZodNumber
+  >),
   comment: z.string().trim().max(1000).optional(),
 });
 
-/** Section 4: the technician rates the customer on agreement compliance. */
+/**
+ * Section 7: the technician rates the customer on agreement compliance. Not
+ * mandatory; only on verified, completed, platform-paid bookings.
+ */
 jobRequestsRouter.post('/jobs/:id/customer-rating', ...techOnly, async (req, res) => {
   const jobId = parse(z.uuid(), req.params.id);
   const b = parse(CustomerRatingBody, req.body);
@@ -144,16 +150,12 @@ jobRequestsRouter.post('/jobs/:id/customer-rating', ...techOnly, async (req, res
   const rating = await tx(async (db) => {
     const job = await one('SELECT * FROM jobs WHERE id = $1 AND technician_id = $2', [jobId, tech.id], db);
     if (!job) throw notFound('Job');
-    if (!['completed', 'paid'].includes(job.status)) throw conflict('You can rate the customer once the job is completed');
-    const required = requiredCustomerRatingCategories(job.labor_only);
-    const missing = required.filter((c) => b.scores[c] === undefined);
-    if (missing.length) throw badRequest(`Score every category: ${missing.join(', ')}`);
-    const scores = Object.fromEntries(required.map((c) => [c, b.scores[c]!]));
-    const vals = Object.values(scores);
+    if (job.status !== 'paid') throw conflict('Customers can be rated once the job is paid through the platform');
+    const vals = Object.values(b.scores);
     const overall = Math.round((vals.reduce((a, v) => a + v, 0) / vals.length) * 100) / 100;
     const rating = await one(
       `INSERT INTO customer_ratings (job_id, technician_id, customer_id, scores, overall, comment) VALUES ($1, $2, $3, $4, $5, $6) RETURNING *`,
-      [jobId, tech.id, job.customer_id, scores, overall, b.comment ?? null],
+      [jobId, tech.id, job.customer_id, b.scores, overall, b.comment ?? null],
       db,
     );
     await db.query(

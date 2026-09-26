@@ -1,21 +1,28 @@
 import { describe, expect, it } from 'vitest';
 import {
+  adjustLabor,
   allocateReduction,
   canTransition,
+  challengeSchedule,
   commissionFor,
   DEFAULT_COMMISSION,
   DEFAULT_MARKUP_CAP_BPS,
-  linesOverCap,
-  nextTierGuidance,
-  priceLine,
-  requiredCustomerRatingCategories,
   DEFAULT_TAXONOMY,
   evaluateCounter,
+  FAST_TRACK_CHALLENGE_TIMELINE,
+  hasCompletionBadge,
+  isAnomalousSwing,
+  linesOverCap,
   maskContactInfo,
+  multiplierFor,
+  nextTierGuidance,
   overallRating,
-  performanceMultiplier,
+  priceLine,
   quoteTotals,
+  rateTierFor,
   reviewTags,
+  STANDARD_CHALLENGE_TIMELINE,
+  weightedRecentAverage,
 } from '../src';
 
 describe('taxonomy', () => {
@@ -36,35 +43,6 @@ describe('booking transitions', () => {
     expect(canTransition('quoted', 'assigned', 'technician')).toBe(false);
     expect(canTransition('assigned', 'open', 'system')).toBe(true);
     expect(canTransition('assigned', 'open', 'technician')).toBe(false);
-  });
-});
-
-describe('reviews', () => {
-  const scores = { quality: 5, punctuality: 4, communication: 5, value: 3, professionalism: 5 };
-  it('averages category scores', () => {
-    expect(overallRating(scores)).toBe(4.4);
-    expect(() => overallRating({ ...scores, value: 6 })).toThrow();
-  });
-  it('tags notable scores', () => {
-    expect(reviewTags(scores)).toEqual(['Quality of work 5★', 'Punctuality 4★', 'Communication 5★', 'Professionalism 5★']);
-    expect(reviewTags({ ...scores, value: 2 })).toContain('Value for money 2★');
-  });
-});
-
-describe('performance multiplier', () => {
-  it('keeps new technicians neutral', () => {
-    expect(performanceMultiplier({ ratingAvg: 5, ratingCount: 2, completedJobs: 2, technicianCancellations: 0, disputes: 0 })).toMatchObject({
-      multiplier: 1,
-      tier: 'new',
-    });
-  });
-  it('rewards top performers and penalises unreliable ones, within bounds', () => {
-    const top = performanceMultiplier({ ratingAvg: 4.9, ratingCount: 40, completedJobs: 50, technicianCancellations: 1, disputes: 0 });
-    expect(top).toMatchObject({ multiplier: 1.2, tier: 'elite' });
-    expect(top.reasons).toHaveLength(2);
-    const poor = performanceMultiplier({ ratingAvg: 3.1, ratingCount: 10, completedJobs: 10, technicianCancellations: 5, disputes: 3 });
-    expect(poor.multiplier).toBe(0.75);
-    expect(poor.tier).toBe('under_review');
   });
 });
 
@@ -132,27 +110,72 @@ describe('pricing model', () => {
   });
 });
 
-describe('next-tier guidance', () => {
-  it('tells new technicians how many jobs remain', () => {
-    const g = nextTierGuidance({ ratingAvg: 0, ratingCount: 0, completedJobs: 1, technicianCancellations: 0, disputes: 0 });
-    expect(g.current.tier).toBe('new');
-    expect(g.actions[0]!.action).toMatch(/Complete 2 more jobs/);
+
+describe('reviews', () => {
+  const scores = { competence: 5, punctuality: 4, professionalism: 5, courtesy: 5, timeline: 3, transparency: 4, quality: 5 };
+  it('averages the seven category scores', () => {
+    expect(overallRating(scores)).toBe(4.43);
+    expect(() => overallRating({ ...scores, quality: 6 })).toThrow();
   });
-  it('shows which improvement reaches the next tier', () => {
-    const g = nextTierGuidance({ ratingAvg: 4.2, ratingCount: 20, completedJobs: 20, technicianCancellations: 3, disputes: 0 });
-    expect(g.current).toMatchObject({ multiplier: 1, tier: 'standard' });
-    expect(g.nextTier).toEqual({ tier: 'trusted', multiplier: 1.05 });
-    const rating = g.actions.find((a) => a.action.includes('4.5'))!;
-    expect(rating).toMatchObject({ resultingMultiplier: 1.1, reachesNextTier: true });
-    const completion = g.actions.find((a) => a.action.includes('95%'))!;
-    expect(completion.action).toMatch(/Complete 37 more jobs/);
-    expect(completion.resultingMultiplier).toBe(1.05);
+  it('tags notable scores', () => {
+    expect(reviewTags(scores)).toContain('Punctuality 4★');
+    expect(reviewTags(scores)).not.toContain('Delivery timeline 3★');
+    expect(reviewTags({ ...scores, timeline: 2 })).toContain('Delivery timeline 2★');
+  });
+  it('weights recent ratings more heavily', () => {
+    const now = new Date('2026-09-01');
+    const daysAgo = (d: number) => new Date(now.getTime() - d * 86_400_000);
+    // An old 1★ and a fresh 5★: with a 90-day half-life the fresh one dominates.
+    expect(weightedRecentAverage([{ value: 1, at: daysAgo(180) }, { value: 5, at: daysAgo(0) }], 90, now)).toBe(4.2);
+    expect(weightedRecentAverage([], 90, now)).toBeNull();
   });
 });
 
-describe('customer ratings', () => {
-  it('only asks about materials on labor-only jobs', () => {
-    expect(requiredCustomerRatingCategories(false)).toEqual(['payment', 'scope', 'conduct']);
-    expect(requiredCustomerRatingCategories(true)).toContain('materials');
+describe('labor rate adjustment (Section 7a)', () => {
+  it('maps the rolling rating to a star tier and labor percentage', () => {
+    expect(rateTierFor(4.6)).toMatchObject({ stars: 5, adjustmentBps: 1000 });
+    expect(rateTierFor(4.2)).toMatchObject({ stars: 4, adjustmentBps: 500 });
+    expect(rateTierFor(3.0)).toMatchObject({ stars: 3, adjustmentBps: 0 });
+    expect(rateTierFor(1.6)).toMatchObject({ stars: 2, adjustmentBps: -500 });
+    expect(rateTierFor(1.0)).toMatchObject({ stars: 1, adjustmentBps: -1000 });
+    expect(rateTierFor(null)).toBeNull();
+  });
+  it('applies to labor only', () => {
+    expect(adjustLabor(100_000, 500)).toBe(105_000);
+    expect(adjustLabor(100_000, -1000)).toBe(90_000);
+    expect(multiplierFor(4.6, 1000, 5)).toMatchObject({ multiplier: 1.1, tierStars: 5 });
+  });
+  it('tells technicians the rating needed for the next tier', () => {
+    expect(nextTierGuidance(4.2)).toMatchObject({ current: { stars: 4, adjustmentBps: 500 }, ratingNeeded: 4.5 });
+    expect(nextTierGuidance(4.9).next).toBeNull();
+    expect(nextTierGuidance(null).ratingNeeded).toBe(3.5);
+  });
+  it('flags a tier drop caused by a single review', () => {
+    expect(isAnomalousSwing({ previousStars: 5, newStars: 4, ratingWithoutLatest: 4.7 })).toBe(true);
+    expect(isAnomalousSwing({ previousStars: 5, newStars: 4, ratingWithoutLatest: 4.3 })).toBe(false);
+    expect(isAnomalousSwing({ previousStars: 4, newStars: 5, ratingWithoutLatest: 4.0 })).toBe(false);
+  });
+});
+
+describe('price challenge timeline (Section 6c)', () => {
+  it('standard: reminders every 4h from hour 6 to 30, admin at 48, final at 72', () => {
+    const s = challengeSchedule(STANDARD_CHALLENGE_TIMELINE);
+    expect(s.filter((x) => x.step === 'reminder').map((x) => x.atHours)).toEqual([6, 10, 14, 18, 22, 26, 30]);
+    expect(s.slice(-2)).toEqual([{ step: 'escalate', atHours: 48 }, { step: 'final', atHours: 72 }]);
+  });
+  it('fast track compresses into 24h: hourly reminders to hour 8, admin at 8, final at 24', () => {
+    const s = challengeSchedule(FAST_TRACK_CHALLENGE_TIMELINE);
+    expect(s.filter((x) => x.step === 'reminder').map((x) => x.atHours)).toEqual([2, 3, 4, 5, 6, 7, 8]);
+    expect(s.find((x) => x.step === 'escalate')!.atHours).toBe(8);
+    expect(s.at(-1)).toEqual({ step: 'final', atHours: 24 });
+  });
+});
+
+describe('completion badge', () => {
+  it('requires consistent platform-paid completions', () => {
+    const rule = { minPaidJobs: 3, minCompletionRate: 0.9 };
+    expect(hasCompletionBadge({ paidJobs: 5, engagedJobs: 5, refundedOrDisputed: 0 }, rule)).toBe(true);
+    expect(hasCompletionBadge({ paidJobs: 2, engagedJobs: 2, refundedOrDisputed: 0 }, rule)).toBe(false);
+    expect(hasCompletionBadge({ paidJobs: 5, engagedJobs: 8, refundedOrDisputed: 0 }, rule)).toBe(false);
   });
 });

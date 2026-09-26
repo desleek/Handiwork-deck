@@ -3,7 +3,7 @@ import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3';
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner';
 import { env } from '../../config/env';
 
-export type FileKind = 'portfolio' | 'receipt' | 'boq' | 'avatar' | 'ad_creative' | 'job_photo' | 'id_document';
+export type FileKind = 'portfolio' | 'receipt' | 'boq' | 'avatar' | 'ad_creative' | 'job_photo' | 'id_document' | 'price_evidence';
 
 export interface UploadTicket {
   driver: 's3' | 'cloudinary';
@@ -80,7 +80,7 @@ export class CloudinaryStorage implements StorageDriver {
       public_id: storageKey,
       timestamp: String(Math.floor(Date.now() / 1000)),
       // Receipts, BOQs and ID documents should not be publicly listable.
-      type: kind === 'id_document' || kind === 'receipt' || kind === 'boq' ? 'authenticated' : 'upload',
+      type: kind === 'id_document' || kind === 'receipt' || kind === 'boq' || kind === 'price_evidence' ? 'authenticated' : 'upload',
     };
     const resourceType = contentType === 'application/pdf' ? 'raw' : 'image';
     return {

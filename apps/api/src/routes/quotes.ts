@@ -1,4 +1,4 @@
-import { allocateReduction, COUNTER_KINDS, evaluateCounter, type LaborOnlyPolicy } from '@handiwork/shared';
+import { allocateReduction, evaluateCounter, type LaborOnlyPolicy } from '@handiwork/shared';
 import { Router } from 'express';
 import { z } from 'zod';
 import { one, query, tx } from '../db/pool';
@@ -10,6 +10,8 @@ import { audit } from '../services/audit';
 import { afterTransition, type JobRecord, transitionJob } from '../services/jobs/lifecycle';
 import { addAdjustment, assignQuote, type QuoteLineInput, refreshQuoteTotals, writeQuoteItems } from '../services/jobs/quotes';
 import { waDeepLink } from '../services/messaging/whatsapp';
+import { effectiveRateBps, recomputeTechnicianRating } from '../services/ratings';
+import { getSetting } from '../services/settings';
 
 /**
  * Itemized quotes and negotiation (Sections 3, 4, 5, 5a).
@@ -81,7 +83,11 @@ quotesRouter.post('/jobs/:id/quotes', authenticate, requireUser('technician'), a
       [jobId, tech.id, job.currency, b.message ?? null, b.etaMinutes ?? null],
       db,
     );
-    const filed = await writeQuoteItems(db, { quoteId: quote.id, jobId, technicianId: tech.id, currency: job.currency, revision: 1 }, b.items as QuoteLineInput[]);
+    const filed = await writeQuoteItems(
+      db,
+      { quoteId: quote.id, jobId, technicianId: tech.id, currency: job.currency, revision: 1, performanceAdjustmentBps: await effectiveRateBps(tech.id, db) },
+      b.items as QuoteLineInput[],
+    );
     if (filed) await db.query(`UPDATE quotes SET status = 'pending_exception' WHERE id = $1`, [quote.id]);
     const full = await one('SELECT * FROM quotes WHERE id = $1', [quote.id], db);
     await audit(jobId, tech.id, 'quote.submitted', { quoteId: quote.id, amountMinor: Number(full.amount_minor), capExceptions: filed }, db);
@@ -132,8 +138,14 @@ quotesRouter.put('/jobs/:id/quotes/:quoteId', authenticate, requireUser('technic
     if (q.technician_id !== tech.id) throw forbidden('Not your quote');
     if (!['pending', 'pending_exception', 'countered'].includes(q.status)) throw conflict(`Quote is ${q.status}`);
     await db.query(`UPDATE quote_counters SET status = 'superseded', responded_at = now() WHERE quote_id = $1 AND status = 'pending'`, [quoteId]);
+    await db.query(`UPDATE price_challenges SET status = 'superseded', resolved_at = now() WHERE quote_id = $1 AND status = 'pending'`, [quoteId]);
     const revision = q.revision + 1;
-    const filed = await writeQuoteItems(db, { quoteId, jobId, technicianId: tech.id, currency: q.currency, revision }, b.items as QuoteLineInput[]);
+    // A revision keeps the labor rate adjustment the quote was first submitted with (Section 7a).
+    const filed = await writeQuoteItems(
+      db,
+      { quoteId, jobId, technicianId: tech.id, currency: q.currency, revision, performanceAdjustmentBps: q.performance_adjustment_bps },
+      b.items as QuoteLineInput[],
+    );
     const quote = await one(
       `UPDATE quotes SET revision = $4, status = $5, labor_only = false,
          message = COALESCE($2, message), eta_minutes = COALESCE($3, eta_minutes)
@@ -162,6 +174,7 @@ quotesRouter.post('/jobs/:id/quotes/:quoteId/withdraw', authenticate, requireUse
     if (!row) throw conflict('Quote cannot be withdrawn');
     await db.query(`UPDATE quote_counters SET status = 'superseded', responded_at = now() WHERE quote_id = $1 AND status = 'pending'`, [quoteId]);
     await db.query(`UPDATE cap_exception_requests SET status = 'withdrawn' WHERE quote_id = $1 AND status = 'pending'`, [quoteId]);
+    await db.query(`UPDATE price_challenges SET status = 'superseded', resolved_at = now() WHERE quote_id = $1 AND status = 'pending'`, [quoteId]);
     await audit(jobId, tech.id, 'quote.withdrawn', { quoteId }, db);
   });
   res.json({ ok: true });
@@ -195,7 +208,7 @@ quotesRouter.post('/jobs/:id/quotes/:quoteId/accept', authenticate, requireUser(
   const job = await tx(async (db) => {
     const q = await lockQuote(db, jobId, quoteId);
     if (q.customer_id !== customer.id) throw forbidden('Not your job');
-    if (q.status === 'countered') throw conflict('You have a counter-offer pending on this quote — withdraw it first');
+    if (q.status === 'countered') throw conflict('A negotiation or price challenge is open on this quote — resolve or withdraw it first');
     if (q.status === 'pending_exception') throw conflict('This quote is under review for a markup exception');
     if (q.status !== 'pending') throw conflict(`Quote is ${q.status}`);
     return assignQuote(db, jobId, quoteId, { id: customer.id, role: 'customer' }, `approved quote ${quoteId} (rev ${q.revision})`);
@@ -205,40 +218,45 @@ quotesRouter.post('/jobs/:id/quotes/:quoteId/accept', authenticate, requireUser(
 });
 
 const CounterBody = z.object({
-  kind: z.enum(COUNTER_KINDS),
-  proposedTotalMinor: z.number().int().positive().optional(),
+  // Parts price challenges are a separate evidence-backed flow: POST …/price-challenges.
+  kind: z.enum(['labor_only', 'labor_negotiation']),
   proposedLaborMinor: z.number().int().positive().optional(),
   message: z.string().trim().max(1000).optional(),
 });
 
-/** Customer counters: labor-only, price challenge (needs a reason) or labor negotiation. */
+/**
+ * Customer counters on labor:
+ *  - labor-only (6b): available when the technician declared "Accept" for the category
+ *  - labor negotiation (6d): a lower labor cost for this job only, below the technician's
+ *    standard rate (which already includes their performance adjustment)
+ */
 quotesRouter.post('/jobs/:id/quotes/:quoteId/counter', authenticate, requireUser('customer'), async (req, res) => {
   const jobId = parse(z.uuid(), req.params.id);
   const quoteId = parse(z.uuid(), req.params.quoteId);
   const b = parse(CounterBody, req.body);
   const customer = currentUser(req);
-  if (b.kind === 'price_challenge' && !b.message) throw badRequest('Explain your price challenge (message)');
   const { counter, q } = await tx(async (db) => {
     const q = await lockQuote(db, jobId, quoteId);
     if (q.customer_id !== customer.id) throw forbidden('Not your job');
     if (q.status !== 'pending') {
       throw conflict(
-        q.status === 'countered' ? 'A counter-offer is already pending on this quote' : q.status === 'pending_exception' ? 'This quote is under review for a markup exception' : `Quote is ${q.status}`,
+        q.status === 'countered' ? 'A negotiation is already open on this quote' : q.status === 'pending_exception' ? 'This quote is under review for a markup exception' : `Quote is ${q.status}`,
       );
     }
     const result = evaluateCounter(totalsOf(q), b, q.labor_only_policy as LaborOnlyPolicy);
     if (!result.ok) throw conflict(result.reason);
     const counter = await one(
-      `INSERT INTO quote_counters (quote_id, quote_revision, kind, proposed_total_minor, proposed_labor_minor, message, created_by)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING *`,
-      [quoteId, q.revision, b.kind, result.proposedTotal, result.proposedLabor ?? null, b.message ?? null, customer.id],
+      `INSERT INTO quote_counters (quote_id, quote_revision, kind, proposed_total_minor, proposed_labor_minor, message, created_by,
+                                   labor_only_policy_snapshot, created_by_role, awaiting)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'customer', 'technician') RETURNING *`,
+      [quoteId, q.revision, b.kind, result.proposedTotal, result.proposedLabor ?? null, b.message ?? null, customer.id, q.labor_only_policy],
       db,
     );
     await db.query(`UPDATE quotes SET status = 'countered' WHERE id = $1`, [quoteId]);
     await audit(jobId, customer.id, 'counter.sent', { quoteId, counterId: counter.id, kind: b.kind, proposedTotalMinor: result.proposedTotal, message: b.message ?? null }, db);
     return { counter, q };
   });
-  const label = { labor_only: 'a labor-only counter', price_challenge: 'a price challenge', labor_negotiation: 'a labor-cost counter' }[b.kind];
+  const label = { labor_only: 'a labor-only request', labor_negotiation: 'a labor cost proposal' }[b.kind];
   await notify(q.technician_id, 'Counter-offer received', `The customer sent ${label} on "${q.job_title}"`, jobId, 'quote.countered');
   res.status(201).json({ counter });
 });
@@ -263,36 +281,66 @@ quotesRouter.post('/jobs/:id/quotes/:quoteId/counters/:counterId/withdraw', auth
 });
 
 /**
- * Technician responds to a counter. Accepting applies it to the quote — drops
- * part lines for labor-only, or adds adjustment lines (labor first, then
- * markup; never the parts' base cost) — and hires the technician at that price.
+ * Responds to an open labor counter. Whoever it is awaiting may answer:
+ *  - technician: accept (hired at that price), decline (quote stays at the standard rate), or —
+ *    for labor negotiation — counter with a labor amount between the proposal and their standard rate
+ *  - customer (to a technician's counter): accept (hired at that price) or decline
+ * A technician declining a labor-only request in a category they declared "Accept" for counts
+ * as a rejection (Section 6b); too many in the rolling window costs rating points and flags them.
  */
-quotesRouter.post('/jobs/:id/quotes/:quoteId/counters/:counterId/respond', authenticate, requireUser('technician'), async (req, res) => {
+quotesRouter.post('/jobs/:id/quotes/:quoteId/counters/:counterId/respond', authenticate, requireUser('technician', 'customer'), async (req, res) => {
   const jobId = parse(z.uuid(), req.params.id);
   const quoteId = parse(z.uuid(), req.params.quoteId);
   const counterId = parse(z.uuid(), req.params.counterId);
-  const { decision } = parse(z.object({ decision: z.enum(['accept', 'decline']) }), req.body);
-  const tech = currentUser(req);
+  const b = parse(
+    z.object({ decision: z.enum(['accept', 'decline', 'counter']), proposedLaborMinor: z.number().int().positive().optional(), message: z.string().trim().max(1000).optional() }),
+    req.body,
+  );
+  const user = currentUser(req);
 
   const outcome = await tx(async (db) => {
     const q = await lockQuote(db, jobId, quoteId);
-    if (q.technician_id !== tech.id) throw forbidden('Not your quote');
     const c = await one(`SELECT * FROM quote_counters WHERE id = $1 AND quote_id = $2 AND status = 'pending' FOR UPDATE`, [counterId, quoteId], db);
-    if (!c) throw conflict('No pending counter-offer');
+    if (!c) throw conflict('No open counter-offer');
+    const party = user.role === 'technician' ? q.technician_id : q.customer_id;
+    if (party !== user.id) throw forbidden('Not your quote');
+    if (c.awaiting !== user.role) throw conflict(`This counter-offer is waiting on the ${c.awaiting}`);
+    const other = user.role === 'technician' ? q.customer_id : q.technician_id;
 
-    if (decision === 'decline') {
-      await db.query(`UPDATE quote_counters SET status = 'declined', responded_at = now() WHERE id = $1`, [counterId]);
-      await db.query(`UPDATE quotes SET status = 'pending' WHERE id = $1`, [quoteId]);
-      await audit(jobId, tech.id, 'counter.declined', { quoteId, counterId, kind: c.kind }, db);
-      return { job: null as JobRecord | null, customerId: q.customer_id, title: q.job_title };
+    if (b.decision === 'counter') {
+      if (user.role !== 'technician' || c.kind !== 'labor_negotiation') throw badRequest('Only technicians can counter a labor cost proposal');
+      const labor = totalsOf(q).labor;
+      const p = b.proposedLaborMinor;
+      if (!p || p <= Number(c.proposed_labor_minor) || p >= labor) throw conflict('Your counter must be between the customer\'s proposal and your standard labor rate');
+      await db.query(`UPDATE quote_counters SET status = 'countered', responded_at = now() WHERE id = $1`, [counterId]);
+      const counter = await one(
+        `INSERT INTO quote_counters (quote_id, quote_revision, kind, proposed_total_minor, proposed_labor_minor, message, created_by, parent_counter_id, created_by_role, awaiting)
+         VALUES ($1, $2, 'labor_negotiation', $3, $4, $5, $6, $7, 'technician', 'customer') RETURNING *`,
+        [quoteId, q.revision, Number(q.amount_minor) - labor + p, p, b.message ?? null, user.id, counterId],
+        db,
+      );
+      await audit(jobId, user.id, 'labor.countered', { quoteId, counterId: counter.id, customerProposedLaborMinor: Number(c.proposed_labor_minor), technicianLaborMinor: p, standardLaborMinor: labor }, db);
+      return { job: null as JobRecord | null, other, title: q.job_title, event: 'countered' as const };
     }
 
+    if (b.decision === 'decline') {
+      await db.query(`UPDATE quote_counters SET status = 'declined', responded_at = now() WHERE id = $1`, [counterId]);
+      await db.query(`UPDATE quotes SET status = 'pending' WHERE id = $1`, [quoteId]);
+      let penalized = false;
+      if (c.kind === 'labor_only' && user.role === 'technician' && c.labor_only_policy_snapshot === 'accept') {
+        penalized = await recordLaborOnlyRejection(db, { technicianId: user.id, categoryId: q.category_id, jobId, counterId });
+      }
+      await audit(jobId, user.id, 'counter.declined', { quoteId, counterId, kind: c.kind, byRole: user.role, laborOnlyRejectionCounted: c.kind === 'labor_only' && c.labor_only_policy_snapshot === 'accept', penalized }, db);
+      return { job: null as JobRecord | null, other, title: q.job_title, event: 'declined' as const };
+    }
+
+    // accept
     const totals = totalsOf(q);
     if (c.kind === 'labor_only') {
       await db.query(`DELETE FROM quote_items WHERE quote_id = $1 AND (kind = 'material' OR applies_to = 'markup')`, [quoteId]);
       await db.query('UPDATE quotes SET labor_only = true WHERE id = $1', [quoteId]);
     } else if (c.kind === 'labor_negotiation') {
-      await addAdjustment(db, quoteId, 'labor', Number(c.proposed_labor_minor) - totals.labor, 'Negotiated labor discount');
+      await addAdjustment(db, quoteId, 'labor', Number(c.proposed_labor_minor) - totals.labor, 'Negotiated labor rate (this job only)');
     } else {
       for (const a of allocateReduction(totals, totals.total - Number(c.proposed_total_minor))) {
         await addAdjustment(db, quoteId, a.appliesTo, a.amountMinor, a.appliesTo === 'labor' ? 'Agreed price adjustment (labor)' : 'Agreed price adjustment (markup)');
@@ -302,17 +350,54 @@ quotesRouter.post('/jobs/:id/quotes/:quoteId/counters/:counterId/respond', authe
     if (after.total !== Number(c.proposed_total_minor)) throw conflict('Counter no longer matches the quote');
     await db.query(`UPDATE quote_counters SET status = 'accepted', responded_at = now() WHERE id = $1`, [counterId]);
     await db.query(`UPDATE quotes SET status = 'pending' WHERE id = $1`, [quoteId]);
-    await audit(jobId, tech.id, 'counter.accepted', { quoteId, counterId, kind: c.kind, totalMinor: after.total }, db);
-    const job = await assignQuote(db, jobId, quoteId, { id: null, role: 'system' }, `technician accepted ${c.kind} counter ${counterId}`);
-    return { job, customerId: q.customer_id, title: q.job_title };
+    await audit(jobId, user.id, 'counter.accepted', { quoteId, counterId, kind: c.kind, byRole: user.role, laborMinor: after.labor, totalMinor: after.total }, db);
+    const job = await assignQuote(db, jobId, quoteId, { id: null, role: 'system' }, `${user.role} accepted ${c.kind} counter ${counterId}`);
+    return { job, other, title: q.job_title, event: 'accepted' as const };
   });
 
+  const who = user.full_name;
   if (outcome.job) {
     await afterTransition(outcome.job);
-    await notify(outcome.customerId, 'Counter-offer accepted', `${tech.full_name} accepted your offer — they're booked for "${outcome.title}"`, jobId, 'quote.counter_accepted');
+    await notify(outcome.other, 'Offer accepted', `${who} accepted — the job "${outcome.title}" is booked at the agreed price.`, jobId, 'quote.counter_accepted');
     res.json({ job: outcome.job, whatsappLink: waDeepLink(outcome.job.ref) ?? null });
-  } else {
-    await notify(outcome.customerId, 'Counter-offer declined', `${tech.full_name} declined your counter on "${outcome.title}". Their quote stands.`, jobId, 'quote.counter_declined');
-    res.json({ ok: true });
+    return;
   }
+  const text =
+    outcome.event === 'countered'
+      ? `${who} proposed a different labor cost for "${outcome.title}".`
+      : `${who} declined the offer on "${outcome.title}". The quote stands at the standard rate.`;
+  await notify(outcome.other, outcome.event === 'countered' ? 'Counter-offer received' : 'Offer declined', text, jobId, `quote.counter_${outcome.event}`);
+  res.json({ ok: true, event: outcome.event });
 });
+
+/**
+ * Section 6b: counts a labor-only rejection against the technician for the category.
+ * Exceeding the cap within the rolling window applies a rating penalty and flags them.
+ * Returns true if a penalty was applied.
+ */
+async function recordLaborOnlyRejection(db: any, r: { technicianId: string; categoryId: number; jobId: string; counterId: string }): Promise<boolean> {
+  const cfg = await getSetting('labor_only_rejections', db);
+  const row = await one(
+    'INSERT INTO labor_only_rejections (technician_id, category_id, job_id, counter_id) VALUES ($1, $2, $3, $4) RETURNING id',
+    [r.technicianId, r.categoryId, r.jobId, r.counterId],
+    db,
+  );
+  const { n } = (await one<{ n: number }>(
+    `SELECT count(*)::int AS n FROM labor_only_rejections WHERE technician_id = $1 AND category_id = $2 AND created_at > now() - make_interval(days => $3)`,
+    [r.technicianId, r.categoryId, cfg.windowDays],
+    db,
+  ))!;
+  if (n <= cfg.cap) return false;
+  await db.query('UPDATE labor_only_rejections SET penalized = true WHERE id = $1', [row.id]);
+  await db.query(
+    `INSERT INTO rating_penalties (technician_id, points, reason, source, expires_at)
+     VALUES ($1, $2, $3, 'labor_only_rejections', now() + make_interval(days => $4))`,
+    [r.technicianId, cfg.penaltyPoints, `${n} labor-only rejections in ${cfg.windowDays} days (cap ${cfg.cap})`, cfg.penaltyDays],
+  );
+  await db.query(`INSERT INTO technician_flags (technician_id, kind, details) VALUES ($1, 'labor_only_rejections', $2)`, [
+    r.technicianId,
+    JSON.stringify({ categoryId: r.categoryId, rejections: n, windowDays: cfg.windowDays, cap: cfg.cap, jobId: r.jobId }),
+  ]);
+  await recomputeTechnicianRating(r.technicianId, db);
+  return true;
+}

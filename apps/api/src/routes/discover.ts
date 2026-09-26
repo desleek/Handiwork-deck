@@ -1,10 +1,10 @@
-import { SERVICE_SEGMENTS } from '@handiwork/shared';
+import { adjustLabor, SERVICE_SEGMENTS } from '@handiwork/shared';
 import { Router } from 'express';
 import { z } from 'zod';
 import { query } from '../db/pool';
 import { authenticate, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
-import { performanceFor } from '../services/performance';
+import { performanceFor } from '../services/ratings';
 
 export const discoverRouter = Router();
 
@@ -26,6 +26,7 @@ const DiscoverQuery = z.object({
 
 interface Row {
   id: string;
+  rate_bps: number;
   full_name: string;
   headline: string | null;
   avatar_url: string | null;
@@ -60,6 +61,7 @@ discoverRouter.get('/discover', authenticate, requireUser(), async (req, res) =>
        SELECT u.id, u.full_name, tp.headline, tp.rating_avg::float8 AS rating_avg, tp.rating_count,
               tp.instant_book_enabled, technician_available_at(tp.user_id, now()) AS available_now,
               (SELECT url FROM files f WHERE f.id = tp.avatar_file_id) AS avatar_url,
+              COALESCE(tp.rate_override_bps, tp.rate_adjustment_bps) AS rate_bps,
               CASE WHEN tp.live_at > now() - make_interval(mins => $8) THEN tp.live_lat END AS live_lat,
               CASE WHEN tp.live_at > now() - make_interval(mins => $8) THEN tp.live_lng END AS live_lng,
               tp.base_lat, tp.base_lng
@@ -91,7 +93,7 @@ discoverRouter.get('/discover', authenticate, requireUser(), async (req, res) =>
             LIMIT 1
          ) svc ON true
      )
-     SELECT id, full_name, headline, avatar_url, rating_avg, rating_count, instant_book_enabled, available_now, labor_only_policy,
+     SELECT id, full_name, headline, avatar_url, rating_avg, rating_count, rate_bps, instant_book_enabled, available_now, labor_only_policy,
             round(live_lat::numeric, 3)::float8 AS live_lat, round(live_lng::numeric, 3)::float8 AS live_lng,
             distance_km, category_id, category_name, category_icon, starting_price_minor, currency, boost_priority
        FROM scored
@@ -111,7 +113,9 @@ discoverRouter.get('/discover', authenticate, requireUser(), async (req, res) =>
       photoUrl: r.avatar_url,
       category: { id: r.category_id, name: r.category_name, icon: r.category_icon },
       rating: { avg: Number(r.rating_avg), count: r.rating_count },
-      startingPrice: r.starting_price_minor != null && r.currency ? { amountMinor: r.starting_price_minor, currency: r.currency } : null,
+      // Section 7a: the standard rate shown includes the technician's performance adjustment.
+      startingPrice:
+        r.starting_price_minor != null && r.currency ? { amountMinor: adjustLabor(Number(r.starting_price_minor), r.rate_bps), currency: r.currency } : null,
       distanceKm: r.distance_km == null ? null : Math.round(r.distance_km * 10) / 10,
       livePosition: r.live_lat != null && r.live_lng != null ? { lat: r.live_lat, lng: r.live_lng } : null,
       instantBook: r.instant_book_enabled,
@@ -140,8 +144,8 @@ discoverRouter.get('/discover', authenticate, requireUser(), async (req, res) =>
 });
 
 /**
- * Organic ranking: performance multiplier × rating (unrated technicians count as
- * 4★ so newcomers aren't buried) ÷ a gentle distance decay (halves at 10 km).
+ * Organic ranking: performance multiplier (Section 7a) × rolling rating (unrated
+ * technicians count as 4★ so newcomers aren't buried) ÷ a gentle distance decay.
  */
 export function organicScore(multiplier: number, ratingAvg: number, ratingCount: number, distanceKm: number | null): number {
   const rating = ratingCount > 0 ? ratingAvg : 4;
