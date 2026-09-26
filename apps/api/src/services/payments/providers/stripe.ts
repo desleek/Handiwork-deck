@@ -81,6 +81,26 @@ export class StripeProvider implements PaymentProvider {
     return { providerRef: session.id, checkoutUrl: session.url ?? undefined, raw: session };
   }
 
+  /**
+   * Moves the technician's funds from the platform balance to their connected
+   * account. Standard payouts then follow the account's payout schedule;
+   * instant payouts are pushed to their debit card/bank immediately.
+   */
+  async payout(input: Parameters<PaymentProvider['payout']>[0]) {
+    const transfer = await this.stripe.transfers.create(
+      { amount: input.amountMinor, currency: input.currency.toLowerCase(), destination: input.payee.accountRef, metadata: { payoutId: input.reference } },
+      { idempotencyKey: `transfer-${input.reference}` },
+    );
+    if (input.speed === 'instant') {
+      const payout = await this.stripe.payouts.create(
+        { amount: input.amountMinor, currency: input.currency.toLowerCase(), method: 'instant', metadata: { payoutId: input.reference } },
+        { stripeAccount: input.payee.accountRef, idempotencyKey: `payout-${input.reference}` },
+      );
+      return { providerRef: payout.id, status: 'processing' as const };
+    }
+    return { providerRef: transfer.id, status: 'sent' as const };
+  }
+
   async parseWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>): Promise<NormalizedWebhookEvent> {
     const sig = header(headers, 'stripe-signature');
     if (!sig || !this.webhookSecret) throw new WebhookSignatureError('stripe');

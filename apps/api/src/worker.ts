@@ -2,7 +2,8 @@ import { Worker } from 'bullmq';
 import { pool } from './db/pool';
 import { logger } from './lib/logger';
 import { processEscalation } from './queues/escalations';
-import { type EscalationJobData, jobs, type NotificationJobData, QUEUE_NAMES, redisConnection } from './queues/index';
+import { type EscalationJobData, jobs, type NotificationJobData, type PayoutJobData, QUEUE_NAMES, redisConnection } from './queues/index';
+import { processPayout } from './services/payouts';
 import { pushToUser } from './services/notifications/push';
 
 const connection = redisConnection();
@@ -13,6 +14,7 @@ const workers = [
     connection,
     concurrency: 20,
   }),
+  new Worker<PayoutJobData>(QUEUE_NAMES.payouts, (job) => processPayout(job.data.payoutId), { connection, concurrency: 2 }),
 ];
 
 for (const w of workers) {

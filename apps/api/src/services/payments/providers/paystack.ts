@@ -7,6 +7,7 @@ import {
 } from '../types';
 
 const BASE_URL = 'https://api.paystack.co';
+const RECIPIENT_TYPE: Record<string, string> = { NGN: 'nuban', GHS: 'ghipss', KES: 'kepss', ZAR: 'basa' };
 
 /**
  * Paystack Split Payments via subaccounts. `transaction_charge` is a flat amount
@@ -44,7 +45,29 @@ export class PaystackProvider implements PaymentProvider {
       primary_contact_email: input.email,
       metadata: { userId: input.userId },
     });
-    return { accountRef: data.subaccount_code };
+    // Payouts use Paystack Transfers, which need a transfer recipient.
+    const currency = input.currency ?? 'NGN';
+    const recipient = await this.call<{ recipient_code: string }>('POST', '/transferrecipient', {
+      type: RECIPIENT_TYPE[currency] ?? 'nuban',
+      name: input.fullName,
+      account_number: input.bank.accountNumber,
+      bank_code: input.bank.bankCode,
+      currency,
+    });
+    return { accountRef: data.subaccount_code, recipientRef: recipient.recipient_code };
+  }
+
+  async payout(input: Parameters<PaymentProvider['payout']>[0]) {
+    if (!input.payee.recipientRef) throw new Error('Paystack payouts need a transfer recipient — re-run payout setup');
+    const data = await this.call<{ transfer_code: string; status: string }>('POST', '/transfer', {
+      source: 'balance',
+      amount: input.amountMinor,
+      currency: input.currency,
+      recipient: input.payee.recipientRef,
+      reference: input.reference,
+      reason: `HANDIWORK-DECK ${input.speed} payout`,
+    });
+    return { providerRef: data.transfer_code, status: data.status === 'success' ? ('sent' as const) : ('processing' as const) };
   }
 
   async createSplitPayment(input: Parameters<PaymentProvider['createSplitPayment']>[0]) {

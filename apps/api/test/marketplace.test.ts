@@ -69,7 +69,7 @@ describe.skipIf(!hasDb)('marketplace flow', () => {
       [TECH_FAR, { baseLat: 6.43, baseLng: 3.42, serviceRadiusKm: 15 }], // Victoria Island, ~20 km away
     ] as const) {
       expect((await request(app).put('/v1/technicians/me').set('Authorization', bearer(t.uid)).send(loc)).status).toBe(200);
-      const svc = await request(app).put('/v1/technicians/me/services').set('Authorization', bearer(t.uid)).send({ services: [{ categoryId: plumbing.id }] });
+      const svc = await request(app).put('/v1/technicians/me/services').set('Authorization', bearer(t.uid)).send({ services: [{ categoryId: plumbing.id, laborOnly: 'accept' }] });
       expect(svc.status).toBe(200);
     }
 
@@ -174,7 +174,7 @@ describe.skipIf(!hasDb)('marketplace flow', () => {
 
     const pay = await request(app).post(`/v1/jobs/${ids.job}/payments`).set('Authorization', bearer(CUSTOMER.uid));
     expect(pay.status).toBe(201);
-    expect(pay.body).toMatchObject({ provider: 'mock', settlement: 'split', amountMinor: 1_500_000, platformFeeMinor: 150_000, currency: 'NGN' });
+    expect(pay.body).toMatchObject({ provider: 'mock', settlement: 'split', amountMinor: 1_500_000, platformFeeMinor: 270_000, currency: 'NGN' });
 
     const body = JSON.stringify({ id: 'evt_1', type: 'payment.succeeded', reference: pay.body.paymentId, amount: 1_500_000 });
     const bad = await request(app).post('/v1/webhooks/payments/mock').set('x-mock-signature', 'forged').set('Content-Type', 'application/json').send(body);

@@ -1,4 +1,4 @@
-import { PAYMENT_METHOD_LABEL, PAYMENT_METHODS, type PaymentMethod, splitFee } from '@handiwork/shared';
+import { PAYMENT_METHOD_LABEL, PAYMENT_METHODS, type PaymentMethod } from '@handiwork/shared';
 import express, { Router } from 'express';
 import type pg from 'pg';
 import { z } from 'zod';
@@ -8,6 +8,7 @@ import { badRequest, conflict, notFound } from '../lib/errors';
 import { logger } from '../lib/logger';
 import { type AppUser, authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
+import { invoiceFor } from '../services/jobs/invoice';
 import { afterTransition, type JobRecord, transitionJob } from '../services/jobs/lifecycle';
 import {
   availableGateways,
@@ -24,8 +25,11 @@ export const paymentsRouter = Router();
 
 type GatewayMethod = Exclude<PaymentMethod, 'wallet'>;
 
-const feeFor = (gross: number) =>
-  splitFee(gross, { bps: env.PLATFORM_FEE_BPS, min: env.PLATFORM_FEE_MIN_MINOR, max: env.PLATFORM_FEE_MAX_MINOR });
+/** Section 5 commission: labor and disclosed markup only, never the base cost of parts. */
+async function splitForJob(jobId: string) {
+  const inv = await invoiceFor(jobId);
+  return { gross: inv.totals.total, platformFee: inv.commission.platformFee, payeeAmount: inv.commission.technicianPayout };
+}
 
 /** Payment methods the customer can choose from for a currency (card, virtual account, USSD, wallet). */
 paymentsRouter.get('/payments/options', authenticate, requireUser(), async (req, res) => {
@@ -68,8 +72,7 @@ paymentsRouter.post('/jobs/:id/payments', authenticate, requireUser('customer'),
   );
   if (!job) throw notFound('Job');
   if (job.status !== 'completed') throw conflict('Payment is taken once the technician marks the job completed');
-  if (!job.budget_minor) throw conflict('Job has no agreed amount');
-  const split = feeFor(Number(job.budget_minor));
+  const split = await splitForJob(jobId);
 
   if (b.method === 'wallet') {
     const paid = await tx(async (db) => {

@@ -3,7 +3,7 @@ import { Redis } from 'ioredis';
 import { env } from '../config/env';
 import type { PushMessage } from '../services/notifications/push';
 
-export const QUEUE_NAMES = { escalations: 'escalations', notifications: 'notifications' } as const;
+export const QUEUE_NAMES = { escalations: 'escalations', notifications: 'notifications', payouts: 'payouts' } as const;
 
 export type EscalationKind = 'no_quote_widen' | 'no_quote_admin' | 'no_show';
 export interface EscalationJobData {
@@ -11,6 +11,9 @@ export interface EscalationJobData {
   jobId: string;
   /** Distinguishes deliberate re-schedules of the same escalation (BullMQ dedupes on job id). */
   round?: number;
+}
+export interface PayoutJobData {
+  payoutId: string;
 }
 export interface NotificationJobData {
   userId: string;
@@ -21,6 +24,7 @@ export interface NotificationJobData {
 export interface JobScheduler {
   scheduleEscalation(data: EscalationJobData, delayMs: number): Promise<void>;
   notify(userId: string, message: PushMessage): Promise<void>;
+  schedulePayout(payoutId: string, delayMs: number): Promise<void>;
   close(): Promise<void>;
 }
 
@@ -34,6 +38,12 @@ export function redisConnection(): Redis {
 class BullScheduler implements JobScheduler {
   private readonly escalations = new Queue<EscalationJobData>(QUEUE_NAMES.escalations, { connection: redisConnection() });
   private readonly notifications = new Queue<NotificationJobData>(QUEUE_NAMES.notifications, { connection: redisConnection() });
+  private readonly payouts = new Queue<PayoutJobData>(QUEUE_NAMES.payouts, { connection: redisConnection() });
+
+  async schedulePayout(payoutId: string, delayMs: number) {
+    // Not retried automatically: a failed transfer refunds the wallet and the technician can request again.
+    await this.payouts.add('payout', { payoutId }, { delay: delayMs, jobId: `payout:${payoutId}`, removeOnComplete: 1000, removeOnFail: 5000 });
+  }
 
   async scheduleEscalation(data: EscalationJobData, delayMs: number) {
     // Deterministic id: re-scheduling the same escalation for a job is a no-op.
@@ -57,7 +67,7 @@ class BullScheduler implements JobScheduler {
   }
 
   async close() {
-    await Promise.all([this.escalations.close(), this.notifications.close()]);
+    await Promise.all([this.escalations.close(), this.notifications.close(), this.payouts.close()]);
   }
 }
 
@@ -65,6 +75,10 @@ class BullScheduler implements JobScheduler {
 export class InMemoryScheduler implements JobScheduler {
   escalations: { data: EscalationJobData; delayMs: number }[] = [];
   notifications: NotificationJobData[] = [];
+  payouts: { payoutId: string; delayMs: number }[] = [];
+  async schedulePayout(payoutId: string, delayMs: number) {
+    this.payouts.push({ payoutId, delayMs });
+  }
   async scheduleEscalation(data: EscalationJobData, delayMs: number) {
     this.escalations.push({ data, delayMs });
   }
@@ -75,6 +89,7 @@ export class InMemoryScheduler implements JobScheduler {
   reset() {
     this.escalations = [];
     this.notifications = [];
+    this.payouts = [];
   }
 }
 

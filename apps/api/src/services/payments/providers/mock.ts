@@ -28,6 +28,11 @@ export class MockProvider implements PaymentProvider {
     return { id: payload.id ?? randomUUID(), type: payload.type, providerRef: payload.reference, reference: payload.reference, amount: payload.amount, raw: payload };
   }
 
+  async payout(input: Parameters<PaymentProvider['payout']>[0]) {
+    if (input.payee.accountNumber === 'FAIL') throw new Error('Mock bank rejected the transfer');
+    return { providerRef: `mock_payout_${input.reference}`, status: 'sent' as const };
+  }
+
   async refund(input: Parameters<PaymentProvider['refund']>[0]) {
     return { refundRef: `mock_refund_${input.providerRef}` };
   }

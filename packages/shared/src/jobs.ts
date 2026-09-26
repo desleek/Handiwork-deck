@@ -28,6 +28,8 @@ export const JOB_TRANSITIONS: Record<JobStatus, readonly Transition[]> = {
   // quoted -> assigned by 'system' happens when a technician accepts the customer's counter-offer.
   quoted: [T('assigned', 'customer', 'system'), T('cancelled', 'customer', 'admin')],
   assigned: [
+    // assigned -> open: the technician declined an instant booking; the job returns to the marketplace.
+    T('open', 'system'),
     T('en_route', 'technician'),
     T('cancelled', 'customer', 'technician', 'admin'),
     T('disputed', 'customer', 'technician'),
@@ -46,7 +48,8 @@ export function canTransition(from: JobStatus, to: JobStatus, actor: UserRole | 
 
 export const ACTIVE_JOB_STATUSES: readonly JobStatus[] = ['assigned', 'en_route', 'in_progress'];
 
-export const QUOTE_STATUSES = ['pending', 'countered', 'accepted', 'rejected', 'withdrawn'] as const;
+/** pending_exception: a line's markup is above the cap and awaits an admin decision (Demand Notice). */
+export const QUOTE_STATUSES = ['pending', 'pending_exception', 'countered', 'accepted', 'rejected', 'withdrawn'] as const;
 export type QuoteStatus = (typeof QUOTE_STATUSES)[number];
 
 /** How the customer engaged: open marketplace post, a request to one technician, or instant book. */

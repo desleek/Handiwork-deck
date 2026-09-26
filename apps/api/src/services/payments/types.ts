@@ -7,6 +7,7 @@ export interface PayeeOnboardingInput {
   email?: string;
   fullName: string;
   country: string; // ISO-3166 alpha-2
+  currency?: string;
   /** Bank details for Paystack / Flutterwave subaccounts. Stripe collects these in hosted onboarding. */
   bank?: { bankCode: string; accountNumber: string };
   /** Where Stripe should send the technician back to after hosted onboarding. */
@@ -17,6 +18,22 @@ export interface PayeeOnboardingResult {
   accountRef: string;
   /** Hosted onboarding link (Stripe Express); absent when onboarding is complete. */
   onboardingUrl?: string;
+  /** Transfer recipient for payouts, where the provider needs one (Paystack). */
+  recipientRef?: string;
+}
+
+export interface PayoutInput {
+  /** Our payout id; idempotency key / provider reference. */
+  reference: string;
+  amountMinor: MinorUnits;
+  currency: string;
+  speed: 'standard' | 'instant';
+  payee: { name: string; accountRef: string; recipientRef?: string | null; bankCode?: string | null; accountNumber?: string | null };
+}
+
+export interface PayoutResult {
+  providerRef: string;
+  status: 'sent' | 'processing';
 }
 
 export interface SplitPaymentInput {
@@ -69,6 +86,8 @@ export interface PaymentProvider {
   /** Verifies the signature and normalises the payload. Throws on a bad signature. */
   parseWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>): Promise<NormalizedWebhookEvent>;
   refund(input: { providerRef: string; amount?: MinorUnits; currency: string }): Promise<{ refundRef: string }>;
+  /** Sends a technician's withdrawal to their bank / connected account. */
+  payout(input: PayoutInput): Promise<PayoutResult>;
 }
 
 export class WebhookSignatureError extends Error {

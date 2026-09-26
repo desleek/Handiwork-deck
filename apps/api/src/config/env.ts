@@ -16,9 +16,6 @@ const schema = z.object({
 
   PAYMENT_DEFAULT_PROVIDER: z.enum(['stripe', 'paystack', 'flutterwave', 'mock']).default('mock'),
   PAYMENT_CURRENCY_ROUTES: z.string().default(''),
-  PLATFORM_FEE_BPS: z.coerce.number().int().min(0).max(10_000).default(1000),
-  PLATFORM_FEE_MIN_MINOR: z.coerce.number().int().min(0).default(0),
-  PLATFORM_FEE_MAX_MINOR: z.coerce.number().int().min(0).default(0),
   STRIPE_SECRET_KEY: optional,
   STRIPE_WEBHOOK_SECRET: optional,
   PAYSTACK_SECRET_KEY: optional,

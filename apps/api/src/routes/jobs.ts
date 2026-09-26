@@ -7,6 +7,7 @@ import { badRequest, conflict, forbidden, HttpError, notFound } from '../lib/err
 import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 import { jobs as scheduler, minutes } from '../queues/index';
+import { invoiceFor } from '../services/jobs/invoice';
 import { afterTransition, type JobRecord, newJobRef, transitionJob } from '../services/jobs/lifecycle';
 import { assignQuote, writeQuoteItems } from '../services/jobs/quotes';
 import { findMatchingTechnicians } from '../services/matching';
@@ -57,16 +58,18 @@ jobsRouter.post('/jobs', authenticate, requireUser('customer'), async (req, res)
   let tech: any = null;
   if (b.technicianId) {
     tech = await one(
-      `SELECT tp.user_id, tp.instant_book_enabled, ts.base_rate_minor, ts.currency
+      `SELECT tp.user_id, tp.instant_book_enabled, ts.base_rate_minor, ts.currency,
+              technician_available_at(tp.user_id, COALESCE($3::timestamptz, now())) AS available
          FROM technician_profiles tp JOIN users u ON u.id = tp.user_id
          JOIN technician_services ts ON ts.technician_id = tp.user_id AND ts.category_id = $2
         WHERE tp.user_id = $1 AND u.is_active AND tp.is_available AND tp.verification_status = 'verified'`,
-      [b.technicianId, b.categoryId],
+      [b.technicianId, b.categoryId, b.scheduledFor ?? null],
     );
     if (!tech) throw conflict('That technician is not available for this service');
     if (b.bookingMode === 'instant') {
       if (!tech.instant_book_enabled) throw conflict('This technician does not offer instant booking — send a booking request instead');
       if (!tech.base_rate_minor || tech.currency !== b.currency) throw conflict('This technician has no listed rate in that currency for instant booking');
+      if (!tech.available) throw conflict("This technician isn't working at that time — pick another time or send a request");
     }
   }
 
@@ -112,7 +115,7 @@ jobsRouter.post('/jobs', authenticate, requireUser('customer'), async (req, res)
       [job.id, tech.user_id, tech.base_rate_minor, b.currency, 'Instant booking at listed rate'],
       db,
     );
-    await writeQuoteItems(db, quote.id, [
+    await writeQuoteItems(db, { quoteId: quote.id, jobId: job.id, technicianId: tech.user_id, currency: b.currency, revision: 1 }, [
       { kind: 'labor', description: `${category.name} — listed rate (instant booking)`, quantity: 1, unitPriceMinor: tech.base_rate_minor },
     ]);
     const assigned = await assignQuote(db, job.id, quote.id, { id: null, role: 'system' }, 'instant booking');
@@ -169,7 +172,7 @@ jobsRouter.get('/jobs', authenticate, requireUser(), async (req, res) => {
       `SELECT * FROM (
          SELECT j.id, j.ref, j.title, j.description, j.address, j.lat, j.lng, j.status, j.scheduled_for, j.booking_mode,
                 j.budget_minor, j.currency, j.category_id, c.name AS category_name, c.icon AS category_icon, j.created_at,
-                j.target_technician_id = $1 AS is_request_to_me, j.match_radius_km, tp.service_radius_km,
+                j.target_technician_id = $1 AS is_request_to_me, j.request_accepted_at, j.match_radius_km, tp.service_radius_km,
                 2 * 6371 * asin(sqrt(power(sin(radians(tp.base_lat - j.lat) / 2), 2) +
                   cos(radians(j.lat)) * cos(radians(tp.base_lat)) * power(sin(radians(tp.base_lng - j.lng) / 2), 2))) AS distance_km,
                 EXISTS (SELECT 1 FROM quotes qq WHERE qq.job_id = j.id AND qq.technician_id = $1) AS already_quoted
@@ -180,6 +183,7 @@ jobsRouter.get('/jobs', authenticate, requireUser(), async (req, res) => {
           WHERE j.status IN ('open', 'quoted') AND tp.verification_status = 'verified' AND tp.base_lat IS NOT NULL
             AND NOT j.awaiting_category_review
             AND (j.target_technician_id IS NULL OR j.target_technician_id = $1)
+            AND NOT EXISTS (SELECT 1 FROM job_dismissals d WHERE d.job_id = j.id AND d.technician_id = $1)
        ) f
        WHERE f.is_request_to_me OR f.distance_km <= GREATEST(f.match_radius_km, f.service_radius_km)
        ORDER BY f.is_request_to_me DESC, f.created_at DESC LIMIT $2`,
@@ -222,26 +226,45 @@ jobsRouter.get('/jobs/:id', authenticate, requireUser(), async (req, res) => {
   const user = currentUser(req);
   const job = await loadJobFor(parse(z.uuid(), req.params.id), user.id, user.role);
   const seesAllQuotes = job.customer_id === user.id || user.role === 'admin';
-  const [quotes, history, review] = await Promise.all([
+  const [quotes, history, review, customer, customerRating] = await Promise.all([
     query(
       `SELECT q.id, q.technician_id, q.amount_minor, q.labor_minor, q.materials_minor, q.currency, q.message, q.eta_minutes,
               q.status, q.revision, q.labor_only, q.created_at, q.updated_at,
-              u.full_name AS technician_name, tp.rating_avg, tp.rating_count, tp.labor_stance,
+              q.parts_base_minor, q.markup_minor,
+              u.full_name AS technician_name, tp.rating_avg, tp.rating_count,
+              COALESCE(ts.labor_only_policy, 'decline') AS labor_only_policy,
               (SELECT coalesce(json_agg(i ORDER BY i.position), '[]'::json) FROM (
-                 SELECT id, kind, description, quantity::float8 AS quantity, unit_price_minor, total_minor, position
+                 SELECT id, kind, description, quantity::float8 AS quantity, unit_price_minor, base_minor, markup_bps, markup_minor,
+                        total_minor, applies_to, receipt_file_id, position
                    FROM quote_items WHERE quote_id = q.id) i) AS items,
+              (SELECT coalesce(json_agg(e ORDER BY e.created_at), '[]'::json) FROM (
+                 SELECT id, quote_item_id, line_description, requested_markup_bps, cap_bps, status, admin_note, created_at
+                   FROM cap_exception_requests WHERE quote_id = q.id AND quote_revision = q.revision AND status <> 'withdrawn') e) AS cap_exceptions,
               (SELECT row_to_json(c) FROM (
                  SELECT id, kind, proposed_total_minor, proposed_labor_minor, message, status, created_at, responded_at
                    FROM quote_counters WHERE quote_id = q.id ORDER BY created_at DESC LIMIT 1) c) AS latest_counter
          FROM quotes q JOIN users u ON u.id = q.technician_id JOIN technician_profiles tp ON tp.user_id = q.technician_id
+         JOIN jobs jj ON jj.id = q.job_id
+         LEFT JOIN technician_services ts ON ts.technician_id = q.technician_id AND ts.category_id = jj.category_id
         WHERE q.job_id = $1 AND ($2 OR q.technician_id = $3) ORDER BY q.amount_minor`,
       [job.id, seesAllQuotes, user.id],
     ),
     query('SELECT from_status, to_status, note, created_at FROM job_status_history WHERE job_id = $1 ORDER BY created_at', [job.id]),
     one('SELECT overall, scores, comment, created_at FROM reviews WHERE job_id = $1', [job.id]),
+    // Technicians see how well the customer has kept to past agreements.
+    one(`SELECT split_part(full_name, ' ', 1) AS first_name, customer_type, customer_rating_avg::float8 AS rating_avg, customer_rating_count AS rating_count FROM users WHERE id = $1`, [job.customer_id]),
+    one('SELECT overall, scores, comment, created_at FROM customer_ratings WHERE job_id = $1', [job.id]),
   ]);
   const isParty = job.customer_id === user.id || job.technician_id === user.id;
-  res.json({ job, quotes, history, review: review ?? null, whatsappLink: isParty && job.technician_id ? (waDeepLink(job.ref) ?? null) : null });
+  res.json({
+    job,
+    quotes,
+    history,
+    review: review ?? null,
+    customer: user.role === 'customer' ? undefined : customer,
+    customerRating: job.technician_id === user.id || user.role === 'admin' ? (customerRating ?? null) : undefined,
+    whatsappLink: isParty && job.technician_id ? (waDeepLink(job.ref) ?? null) : null,
+  });
 });
 
 const StatusBody = z.object({
@@ -253,6 +276,13 @@ jobsRouter.post('/jobs/:id/status', authenticate, requireUser('customer', 'techn
   const jobId = parse(z.uuid(), req.params.id);
   const b = parse(StatusBody, req.body);
   const user = currentUser(req);
+  if (b.status === 'completed') {
+    // Section 5: parts above the receipt threshold need proof of purchase before invoicing.
+    const inv = await invoiceFor(jobId);
+    if (inv.missingReceipts.length) {
+      throw new HttpError(409, 'Attach receipts for the listed parts before completing the job', 'receipts_required', { lines: inv.missingReceipts });
+    }
+  }
   const job = await transitionJob(jobId, b.status, { id: user.id, role: user.role }, { note: b.note });
   // The relay stays open through completion so the parties can sort out payment; it closes once paid.
   if (job.status === 'cancelled') {

@@ -76,11 +76,13 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
     ] as const) {
       id[key] = await register(U[key], { role: 'technician', fullName: name });
       await request(app).put('/v1/technicians/me').set(as(U[key].uid)).send({ ...loc, serviceRadiusKm: 15 });
-      await request(app).put('/v1/technicians/me/services').set(as(U[key].uid)).send({ services: [{ categoryId: plumbing, baseRateMinor: 800_000, currency: 'NGN' }] });
+      await request(app).put('/v1/technicians/me/services').set(as(U[key].uid)).send({ services: [{ categoryId: plumbing, baseRateMinor: 800_000, currency: 'NGN', laborOnly: 'accept' }] });
       await request(app).post(`/v1/admin/technicians/${id[key]}/verification`).set(as(U.admin.uid)).send({ status: 'verified' });
     }
-    await request(app).put('/v1/technicians/me').set(as(U.bola.uid)).send({ laborStance: 'no_labor_only' });
-    await request(app).put('/v1/technicians/me/services').set(as(U.bola.uid)).send({ services: [{ categoryId: plumbing, baseRateMinor: 500_000, currency: 'NGN' }] });
+    // Bola declared "no labor-only" for plumbing at onboarding. Declarations start their cooldown when made,
+    // so clear Bola's initial one to allow this re-declaration in the test.
+    await pool.query('DELETE FROM technician_labor_only_declarations WHERE technician_id = $1', [id.bola]);
+    await request(app).put('/v1/technicians/me/services').set(as(U.bola.uid)).send({ services: [{ categoryId: plumbing, baseRateMinor: 500_000, currency: 'NGN', laborOnly: 'decline' }] });
   });
   beforeEach(() => {
     scheduler.reset();
@@ -147,8 +149,10 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
 
     it('turns an approved technician trade suggestion into a category on their profile', async () => {
       const s = await request(app).post('/v1/categories/suggestions').set(as(U.chidi.uid)).send({ name: 'Swimming Pool Maintenance', segment: 'household_office' });
-      expect(s.status).toBe(201);
-      await request(app).post(`/v1/admin/category-suggestions/${s.body.suggestion.id}/approve`).set(as(U.admin.uid)).send({ icon: 'water' });
+      expect(s.status).toBe(400); // must declare labor-only for the trade
+      const s2 = await request(app).post('/v1/categories/suggestions').set(as(U.chidi.uid)).send({ name: 'Swimming Pool Maintenance', segment: 'household_office', laborOnly: 'accept' });
+      expect(s2.status).toBe(201);
+      expect((await request(app).post(`/v1/admin/category-suggestions/${s2.body.suggestion.id}/approve`).set(as(U.admin.uid)).send({ icon: 'water' })).status).toBe(200);
       const profile = await request(app).get(`/v1/technicians/${id.chidi}`).set(as(U.cust.uid));
       expect(profile.body.technician.services.map((x: { name: string }) => x.name)).toContain('Swimming Pool Maintenance');
     });
@@ -169,7 +173,7 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       expect(bola).toMatchObject({
         category: { id: plumbing, name: 'Plumbing', icon: 'water' },
         startingPrice: { amountMinor: 500_000, currency: 'NGN' },
-        laborStance: 'no_labor_only',
+        laborOnly: 'decline',
         performance: { multiplier: 1, tier: 'new' },
       });
 
@@ -205,7 +209,8 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       const p = await request(app).get(`/v1/technicians/${id.alice}`).set(as(U.cust.uid));
       expect(p.body.technician.portfolio).toHaveLength(5);
       expect(p.body.technician.certifications[0]).toMatchObject({ title: 'COREN Plumbing Cert', is_verified: true });
-      expect(p.body.technician).toMatchObject({ labor_stance: 'case_by_case', performance: { tier: 'new' } });
+      expect(p.body.technician).toMatchObject({ performance: { tier: 'new' } });
+      expect(p.body.technician.services[0].labor_only_policy).toBe('accept');
     });
   });
 
@@ -247,7 +252,7 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       { kind: 'labor', description: 'Replace cistern', quantity: 1, unitPriceMinor: 2_000_000 },
       { kind: 'material', description: 'Cistern unit', quantity: 1, unitPriceMinor: 4_500_000 },
       { kind: 'material', description: 'Fittings', quantity: 5, unitPriceMinor: 100_000 },
-      { kind: 'transport', description: 'Transport', quantity: 1, unitPriceMinor: 300_000 },
+      { kind: 'labor', description: 'Transport / call-out', quantity: 1, unitPriceMinor: 300_000 },
     ];
     let jobId: string;
     let aliceQuote: string;
@@ -257,7 +262,7 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       jobId = (await postJob(U.cust.uid, { title: 'Replace toilet cistern' })).body.job.id;
       const a = await request(app).post(`/v1/jobs/${jobId}/quotes`).set(as(U.alice.uid)).send({ items });
       expect(a.status).toBe(201);
-      expect(a.body.quote).toMatchObject({ amount_minor: 7_300_000, labor_minor: 2_000_000, materials_minor: 5_000_000 });
+      expect(a.body.quote).toMatchObject({ amount_minor: 7_300_000, labor_minor: 2_300_000, materials_minor: 5_000_000, parts_base_minor: 5_000_000 });
       aliceQuote = a.body.quote.id;
       bolaQuote = (await request(app).post(`/v1/jobs/${jobId}/quotes`).set(as(U.bola.uid)).send({ items })).body.quote.id;
       const d = await request(app).get(`/v1/jobs/${jobId}`).set(as(U.cust.uid));
@@ -266,16 +271,17 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
 
     it('validates counters against the quote and the technician stance', async () => {
       const c = (quoteId: string, body: object) => request(app).post(`/v1/jobs/${jobId}/quotes/${quoteId}/counter`).set(as(U.cust.uid)).send(body);
-      expect((await c(bolaQuote, { kind: 'labor_only' })).body.error.message).toMatch(/does not take labor-only/);
+      expect((await c(bolaQuote, { kind: 'labor_only' })).body.error.message).toMatch(/no labor-only/);
       expect((await c(aliceQuote, { kind: 'price_challenge', proposedTotalMinor: 6_000_000 })).status).toBe(400); // needs a reason
       expect((await c(aliceQuote, { kind: 'price_challenge', proposedTotalMinor: 9_000_000, message: 'x' })).status).toBe(409);
       expect((await c(aliceQuote, { kind: 'labor_negotiation', proposedLaborMinor: 2_500_000 })).status).toBe(409);
+      expect((await c(aliceQuote, { kind: 'price_challenge', proposedTotalMinor: 4_000_000, message: 'below parts cost' })).status).toBe(409);
     });
 
     it('lets the technician decline a counter, restoring the original quote', async () => {
       const c = await request(app).post(`/v1/jobs/${jobId}/quotes/${bolaQuote}/counter`).set(as(U.cust.uid)).send({ kind: 'labor_negotiation', proposedLaborMinor: 1_500_000 });
       expect(c.status).toBe(201);
-      expect(c.body.counter.proposed_total_minor).toBe(6_800_000);
+      expect(c.body.counter.proposed_total_minor).toBe(6_500_000);
       // Can't approve while the counter is pending, or stack a second counter.
       expect((await request(app).post(`/v1/jobs/${jobId}/quotes/${bolaQuote}/accept`).set(as(U.cust.uid))).status).toBe(409);
       const r = await request(app).post(`/v1/jobs/${jobId}/quotes/${bolaQuote}/counters/${c.body.counter.id}/respond`).set(as(U.bola.uid)).send({ decision: 'decline' });
@@ -294,13 +300,13 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
 
     it('accepting a labor-only counter drops materials and hires the technician at that price', async () => {
       const c = await request(app).post(`/v1/jobs/${jobId}/quotes/${aliceQuote}/counter`).set(as(U.cust.uid)).send({ kind: 'labor_only', message: 'I will buy the cistern' });
-      expect(c.body.counter.proposed_total_minor).toBe(2_300_000);
+      expect(c.body.counter.proposed_total_minor).toBe(2_300_000); // labor + call-out
       const r = await request(app).post(`/v1/jobs/${jobId}/quotes/${aliceQuote}/counters/${c.body.counter.id}/respond`).set(as(U.alice.uid)).send({ decision: 'accept' });
       expect(r.status).toBe(200);
       expect(r.body.job).toMatchObject({ status: 'assigned', technician_id: id.alice, budget_minor: 2_300_000, labor_only: true });
       const d = await request(app).get(`/v1/jobs/${jobId}`).set(as(U.cust.uid));
       const q = d.body.quotes.find((x: { id: string }) => x.id === aliceQuote);
-      expect(q.items.map((i: { kind: string }) => i.kind)).toEqual(['labor', 'transport']);
+      expect(q.items.map((i: { kind: string }) => i.kind)).toEqual(['labor', 'labor']);
       expect(d.body.quotes.find((x: { id: string }) => x.id === bolaQuote).status).toBe('rejected');
       await request(app).post(`/v1/jobs/${jobId}/status`).set(as(U.cust.uid)).send({ status: 'cancelled' });
     });
@@ -312,7 +318,7 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       const r = await request(app).post(`/v1/jobs/${j}/quotes/${q}/counters/${c.body.counter.id}/respond`).set(as(U.bola.uid)).send({ decision: 'accept' });
       expect(r.body.job.budget_minor).toBe(7_000_000);
       const d = await request(app).get(`/v1/jobs/${j}`).set(as(U.cust.uid));
-      expect(d.body.quotes[0].items.at(-1)).toMatchObject({ kind: 'adjustment', total_minor: -300_000 });
+      expect(d.body.quotes[0].items.at(-1)).toMatchObject({ kind: 'adjustment', applies_to: 'labor', total_minor: -300_000 });
       await request(app).post(`/v1/jobs/${j}/status`).set(as(U.cust.uid)).send({ status: 'cancelled' });
     });
   });
@@ -375,10 +381,10 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       const jobId = await completeJobWith(U.alice.uid, U.cust.uid, 1_000_000);
       const pay = await request(app).post(`/v1/jobs/${jobId}/payments`).set(as(U.cust.uid)).send({ method: 'wallet' });
       expect(pay.status, JSON.stringify(pay.body)).toBe(201);
-      expect(pay.body).toMatchObject({ status: 'succeeded', method: 'wallet', amountMinor: 1_000_000, platformFeeMinor: 100_000 });
+      expect(pay.body).toMatchObject({ status: 'succeeded', method: 'wallet', amountMinor: 1_000_000, platformFeeMinor: 180_000 });
       expect((await request(app).get(`/v1/jobs/${jobId}`).set(as(U.cust.uid))).body.job.status).toBe('paid');
       const tw = await request(app).get('/v1/wallet').set(as(U.alice.uid));
-      expect(tw.body.balances).toEqual([{ currency: 'NGN', balance_minor: 900_000 }]);
+      expect(tw.body.balances).toEqual([{ currency: 'NGN', balance_minor: 820_000 }]);
       const cw = await request(app).get('/v1/wallet').set(as(U.cust.uid));
       expect(cw.body.balances[0].balance_minor).toBe(4_000_000);
       id.paidJob = jobId;
@@ -422,7 +428,7 @@ describe.skipIf(!hasDb)('Section 2 & 3: taxonomy and customer flow', () => {
       expect(pay.body).toMatchObject({ settlement: 'platform_collect', method: 'ussd' });
       expect((await webhook({ id: 'evt_pc', type: 'payment.succeeded', reference: pay.body.paymentId, amount: 1_000_000 })).body.outcome).toBe('paid');
       const tw = await request(app).get('/v1/wallet').set(as(U.bola.uid));
-      expect(tw.body.balances).toEqual([{ currency: 'NGN', balance_minor: 900_000 }]);
+      expect(tw.body.balances).toEqual([{ currency: 'NGN', balance_minor: 820_000 }]);
     });
 
     it('refunds a wallet payment back to the customer wallet', async () => {

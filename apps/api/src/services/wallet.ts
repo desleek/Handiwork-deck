@@ -1,7 +1,7 @@
 import type pg from 'pg';
 import { HttpError } from '../lib/errors';
 
-export type WalletEntryKind = 'topup' | 'job_payment' | 'job_earning' | 'refund' | 'withdrawal' | 'adjustment';
+export type WalletEntryKind = 'topup' | 'job_payment' | 'job_earning' | 'refund' | 'withdrawal' | 'adjustment' | 'promotion' | 'fee';
 
 /**
  * Posts a signed amount to a user's wallet and records it in the ledger, inside
@@ -10,16 +10,26 @@ export type WalletEntryKind = 'topup' | 'job_payment' | 'job_earning' | 'refund'
  */
 export async function postToWallet(
   db: pg.PoolClient,
-  e: { userId: string; currency: string; amountMinor: number; kind: WalletEntryKind; paymentId?: string; jobId?: string; memo?: string },
+  e: {
+    userId: string;
+    currency: string;
+    amountMinor: number;
+    kind: WalletEntryKind;
+    paymentId?: string;
+    jobId?: string;
+    payoutId?: string;
+    promotionId?: string;
+    memo?: string;
+  },
 ): Promise<boolean> {
   if (!Number.isInteger(e.amountMinor) || e.amountMinor === 0) throw new Error('wallet amount must be a non-zero integer');
   await db.query('SAVEPOINT wallet_post');
   try {
     const inserted = await db.query(
-      `INSERT INTO wallet_ledger (user_id, currency, amount_minor, kind, payment_id, job_id, memo)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       ON CONFLICT (payment_id, user_id, kind) WHERE payment_id IS NOT NULL DO NOTHING RETURNING id`,
-      [e.userId, e.currency, e.amountMinor, e.kind, e.paymentId ?? null, e.jobId ?? null, e.memo ?? null],
+      `INSERT INTO wallet_ledger (user_id, currency, amount_minor, kind, payment_id, job_id, payout_id, promotion_id, memo)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       ON CONFLICT DO NOTHING RETURNING id`,
+      [e.userId, e.currency, e.amountMinor, e.kind, e.paymentId ?? null, e.jobId ?? null, e.payoutId ?? null, e.promotionId ?? null, e.memo ?? null],
     );
     if (!inserted.rowCount) {
       await db.query('RELEASE SAVEPOINT wallet_post');

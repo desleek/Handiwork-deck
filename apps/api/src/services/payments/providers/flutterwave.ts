@@ -78,6 +78,20 @@ export class FlutterwaveProvider implements PaymentProvider {
     return { providerRef: input.reference, checkoutUrl: data.link, raw: data };
   }
 
+  async payout(input: Parameters<PaymentProvider['payout']>[0]) {
+    if (!input.payee.bankCode || !input.payee.accountNumber) throw new Error('Flutterwave payouts need bank details — re-run payout setup');
+    const data = await this.call<{ id: number; status: string }>('POST', '/transfers', {
+      account_bank: input.payee.bankCode,
+      account_number: input.payee.accountNumber,
+      amount: toMajor(input.amountMinor, input.currency),
+      currency: input.currency,
+      debit_currency: input.currency,
+      reference: input.reference,
+      narration: `HANDIWORK-DECK ${input.speed} payout`,
+    });
+    return { providerRef: String(data.id), status: data.status === 'SUCCESSFUL' ? ('sent' as const) : ('processing' as const) };
+  }
+
   async parseWebhook(rawBody: Buffer, headers: Record<string, string | string[] | undefined>): Promise<NormalizedWebhookEvent> {
     const sig = header(headers, 'verif-hash');
     if (

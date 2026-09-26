@@ -123,7 +123,14 @@ adminTaxonomyRouter.post('/admin/category-suggestions/:id/approve', async (req, 
       [id, category.id, admin.id],
     );
     if (s.suggested_by_role === 'technician') {
-      await db.query('INSERT INTO technician_services (technician_id, category_id) VALUES ($1, $2) ON CONFLICT DO NOTHING', [s.suggested_by, category.id]);
+      const policy = s.labor_only_policy ?? 'decline';
+      const added = await db.query(
+        'INSERT INTO technician_services (technician_id, category_id, labor_only_policy) VALUES ($1, $2, $3) ON CONFLICT DO NOTHING',
+        [s.suggested_by, category.id, policy],
+      );
+      if (added.rowCount) {
+        await db.query('INSERT INTO technician_labor_only_declarations (technician_id, category_id, policy) VALUES ($1, $2, $3)', [s.suggested_by, category.id, policy]);
+      }
     }
     let job = null;
     if (s.job_id) {

@@ -8,3 +8,4 @@ export * from './performance';
 export * from './contact';
 export * from './quotes';
 export * from './payments';
+export * from './customerRatings';

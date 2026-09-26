@@ -1,12 +1,13 @@
-import { LABOR_STANCES, reviewTags, REVIEW_CATEGORIES } from '@handiwork/shared';
+import { LABOR_ONLY_POLICIES, reviewTags, REVIEW_CATEGORIES } from '@handiwork/shared';
 import { Router } from 'express';
 import { z } from 'zod';
 import { one, query, tx } from '../db/pool';
-import { badRequest, conflict, notFound } from '../lib/errors';
+import { badRequest, conflict, HttpError, notFound } from '../lib/errors';
 import { authenticate, currentUser, requireUser } from '../middleware/auth';
 import { parse } from '../middleware/validate';
 import { getProvider, providerForCurrency } from '../services/payments/index';
 import { performanceFor } from '../services/performance';
+import { getSetting } from '../services/settings';
 
 /** Section 3: technician profiles show at most this many portfolio images. */
 export const MAX_PORTFOLIO_ITEMS = 5;
@@ -23,13 +24,15 @@ const ProfileBody = z.object({
   serviceRadiusKm: z.number().min(1).max(500).optional(),
   headline: z.string().trim().max(120).optional(),
   avatarFileId: z.uuid().optional(),
-  laborStance: z.enum(LABOR_STANCES).optional(),
+  /** IANA zone for the availability calendar, e.g. Africa/Lagos. */
+  timezone: z.string().min(3).max(64).optional(),
   instantBookEnabled: z.boolean().optional(),
 });
 
 techniciansRouter.put('/technicians/me', ...techOnly, async (req, res) => {
   const b = parse(ProfileBody, req.body);
   const techId = currentUser(req).id;
+  if (b.timezone && !Intl.supportedValuesOf('timeZone').includes(b.timezone)) throw badRequest('Unknown timezone');
   if (b.avatarFileId) {
     const f = await one(`SELECT 1 FROM files WHERE id = $1 AND owner_id = $2 AND kind = 'avatar'`, [b.avatarFileId, techId]);
     if (!f) throw notFound('Avatar file');
@@ -40,11 +43,11 @@ techniciansRouter.put('/technicians/me', ...techOnly, async (req, res) => {
        is_available = COALESCE($4, is_available), base_lat = COALESCE($5, base_lat),
        base_lng = COALESCE($6, base_lng), service_radius_km = COALESCE($7, service_radius_km),
        headline = COALESCE($8, headline), avatar_file_id = COALESCE($9, avatar_file_id),
-       labor_stance = COALESCE($10, labor_stance), instant_book_enabled = COALESCE($11, instant_book_enabled)
+       timezone = COALESCE($10, timezone), instant_book_enabled = COALESCE($11, instant_book_enabled)
      WHERE user_id = $1 RETURNING *`,
     [
       techId, b.bio ?? null, b.yearsExperience ?? null, b.isAvailable ?? null, b.baseLat ?? null, b.baseLng ?? null,
-      b.serviceRadiusKm ?? null, b.headline ?? null, b.avatarFileId ?? null, b.laborStance ?? null, b.instantBookEnabled ?? null,
+      b.serviceRadiusKm ?? null, b.headline ?? null, b.avatarFileId ?? null, b.timezone ?? null, b.instantBookEnabled ?? null,
     ],
   );
   res.json({ profile });
@@ -77,26 +80,170 @@ const ServicesBody = z.object({
         categoryId: z.number().int().positive(),
         baseRateMinor: z.number().int().min(0).optional(),
         currency: z.string().length(3).toUpperCase().optional(),
+        /** Section 4: per-category labor-only declaration ("Accept" / "Decline from inception"). */
+        laborOnly: z.enum(LABOR_ONLY_POLICIES),
       }),
     )
     .min(1)
-    .max(20),
+    .max(30),
 });
 
-/** Replaces the technician's list of offered services. */
+/** Latest declaration for (technician, category), including for services since removed. */
+async function lastDeclaration(db: any, techId: string, categoryId: number) {
+  return one<{ policy: string; declared_at: Date }>(
+    `SELECT policy, declared_at FROM technician_labor_only_declarations
+      WHERE technician_id = $1 AND category_id = $2 ORDER BY declared_at DESC, id DESC LIMIT 1`,
+    [techId, categoryId],
+    db,
+  );
+}
+
+/** Rejects a declaration change inside the cooldown window. Returns true if a new declaration must be recorded. */
+async function checkDeclaration(db: any, techId: string, categoryId: number, policy: string, cooldownDays: number): Promise<boolean> {
+  const last = await lastDeclaration(db, techId, categoryId);
+  if (!last) return true;
+  if (last.policy === policy) return false;
+  const nextAllowed = new Date(new Date(last.declared_at).getTime() + cooldownDays * 86_400_000);
+  if (nextAllowed > new Date()) {
+    throw new HttpError(409, `Labor-only declarations can be switched once every ${cooldownDays} days`, 'labor_only_cooldown', {
+      categoryId,
+      currentPolicy: last.policy,
+      nextChangeAllowedAt: nextAllowed.toISOString(),
+    });
+  }
+  return true;
+}
+
+/**
+ * Replaces the technician's list of offered services. Every service carries a
+ * labor-only declaration; declarations are permanent unless switched, and a
+ * switch is only allowed once per cooldown period (even across remove/re-add).
+ */
 techniciansRouter.put('/technicians/me/services', ...techOnly, async (req, res) => {
   const { services } = parse(ServicesBody, req.body);
   const techId = currentUser(req).id;
+  const cooldown = await getSetting('labor_only_cooldown_days');
   await tx(async (db) => {
+    const inactive = await one<{ n: number }>(
+      'SELECT count(*)::int AS n FROM service_categories WHERE id = ANY($1) AND (NOT is_active OR is_other)',
+      [services.map((s) => s.categoryId)],
+      db,
+    );
+    if (inactive?.n) throw badRequest('One or more categories are not available');
+    const record: typeof services = [];
+    for (const s of services) if (await checkDeclaration(db, techId, s.categoryId, s.laborOnly, cooldown)) record.push(s);
     await db.query('DELETE FROM technician_services WHERE technician_id = $1', [techId]);
     for (const s of services) {
       await db.query(
-        'INSERT INTO technician_services (technician_id, category_id, base_rate_minor, currency) VALUES ($1, $2, $3, $4)',
-        [techId, s.categoryId, s.baseRateMinor ?? null, s.currency ?? null],
+        'INSERT INTO technician_services (technician_id, category_id, base_rate_minor, currency, labor_only_policy) VALUES ($1, $2, $3, $4, $5)',
+        [techId, s.categoryId, s.baseRateMinor ?? null, s.currency ?? null, s.laborOnly],
       );
+    }
+    for (const s of record) {
+      await db.query('INSERT INTO technician_labor_only_declarations (technician_id, category_id, policy) VALUES ($1, $2, $3)', [techId, s.categoryId, s.laborOnly]);
     }
   });
   res.json({ services });
+});
+
+/** Switch a single category's labor-only declaration (subject to the cooldown). */
+techniciansRouter.put('/technicians/me/services/:categoryId/labor-only', ...techOnly, async (req, res) => {
+  const categoryId = parse(z.coerce.number().int().positive(), req.params.categoryId);
+  const { policy } = parse(z.object({ policy: z.enum(LABOR_ONLY_POLICIES) }), req.body);
+  const techId = currentUser(req).id;
+  const cooldown = await getSetting('labor_only_cooldown_days');
+  await tx(async (db) => {
+    const svc = await one('SELECT 1 FROM technician_services WHERE technician_id = $1 AND category_id = $2 FOR UPDATE', [techId, categoryId], db);
+    if (!svc) throw notFound('Service');
+    if (!(await checkDeclaration(db, techId, categoryId, policy, cooldown))) return;
+    await db.query('UPDATE technician_services SET labor_only_policy = $3 WHERE technician_id = $1 AND category_id = $2', [techId, categoryId, policy]);
+    await db.query('INSERT INTO technician_labor_only_declarations (technician_id, category_id, policy) VALUES ($1, $2, $3)', [techId, categoryId, policy]);
+  });
+  res.json({ categoryId, policy });
+});
+
+// ---------------------------------------------------------------- availability calendar
+const Time = z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'HH:MM');
+const AvailabilityBody = z.object({
+  timezone: z.string().min(3).max(64).optional(),
+  /** Weekly working hours; empty = no fixed hours (available whenever marked available). */
+  weekly: z
+    .array(z.object({ day: z.number().int().min(0).max(6), start: Time, end: Time }).refine((w) => w.start < w.end, 'start must be before end'))
+    .max(28),
+});
+
+techniciansRouter.put('/technicians/me/availability', ...techOnly, async (req, res) => {
+  const b = parse(AvailabilityBody, req.body);
+  const techId = currentUser(req).id;
+  if (b.timezone && !Intl.supportedValuesOf('timeZone').includes(b.timezone)) throw badRequest('Unknown timezone');
+  await tx(async (db) => {
+    if (b.timezone) await db.query('UPDATE technician_profiles SET timezone = $2 WHERE user_id = $1', [techId, b.timezone]);
+    await db.query('DELETE FROM technician_availability WHERE technician_id = $1', [techId]);
+    for (const w of b.weekly) {
+      await db.query('INSERT INTO technician_availability (technician_id, day_of_week, start_time, end_time) VALUES ($1, $2, $3, $4)', [techId, w.day, w.start, w.end]);
+    }
+  });
+  res.json(await availabilityOf(techId));
+});
+
+techniciansRouter.get('/technicians/me/availability', ...techOnly, async (req, res) => {
+  res.json(await availabilityOf(currentUser(req).id));
+});
+
+const TimeOffBody = z.object({ startsAt: z.iso.datetime(), endsAt: z.iso.datetime(), reason: z.string().max(200).optional() }).refine((b) => b.startsAt < b.endsAt, 'startsAt must be before endsAt');
+
+techniciansRouter.post('/technicians/me/time-off', ...techOnly, async (req, res) => {
+  const b = parse(TimeOffBody, req.body);
+  const row = await one(
+    'INSERT INTO technician_time_off (technician_id, starts_at, ends_at, reason) VALUES ($1, $2, $3, $4) RETURNING *',
+    [currentUser(req).id, b.startsAt, b.endsAt, b.reason ?? null],
+  );
+  res.status(201).json({ timeOff: row });
+});
+
+techniciansRouter.delete('/technicians/me/time-off/:id', ...techOnly, async (req, res) => {
+  const id = parse(z.uuid(), req.params.id);
+  const row = await one('DELETE FROM technician_time_off WHERE id = $1 AND technician_id = $2 RETURNING id', [id, currentUser(req).id]);
+  if (!row) throw notFound('Time off');
+  res.status(204).end();
+});
+
+export async function availabilityOf(techId: string) {
+  const [profile, weekly, timeOff] = await Promise.all([
+    one('SELECT timezone, technician_available_at(user_id, now()) AS available_now FROM technician_profiles WHERE user_id = $1', [techId]),
+    query(`SELECT day_of_week AS day, to_char(start_time, 'HH24:MI') AS start, to_char(end_time, 'HH24:MI') AS end FROM technician_availability WHERE technician_id = $1 ORDER BY 1, 2`, [techId]),
+    query('SELECT id, starts_at, ends_at, reason FROM technician_time_off WHERE technician_id = $1 AND ends_at > now() ORDER BY starts_at', [techId]),
+  ]);
+  return { timezone: profile?.timezone, availableNow: profile?.available_now ?? false, weekly, timeOff };
+}
+
+// ---------------------------------------------------------------- onboarding
+/** Section 4 onboarding checklist: ID/certification, services + labor-only declarations, coverage area, availability. */
+techniciansRouter.get('/technicians/me/onboarding', ...techOnly, async (req, res) => {
+  const techId = currentUser(req).id;
+  const s = await one(
+    `SELECT tp.verification_status, tp.onboarding_completed_at,
+            EXISTS (SELECT 1 FROM files f WHERE f.owner_id = tp.user_id AND f.kind = 'id_document') AS has_id,
+            EXISTS (SELECT 1 FROM technician_certifications c WHERE c.technician_id = tp.user_id) AS has_cert,
+            EXISTS (SELECT 1 FROM technician_services ts WHERE ts.technician_id = tp.user_id) AS has_services,
+            tp.base_lat IS NOT NULL AND tp.service_radius_km > 0 AS has_coverage,
+            EXISTS (SELECT 1 FROM technician_availability a WHERE a.technician_id = tp.user_id) AS has_availability,
+            (SELECT count(*) FROM portfolio_items p WHERE p.technician_id = tp.user_id)::int AS portfolio_count,
+            tp.payout_provider IS NOT NULL AS has_payout
+       FROM technician_profiles tp WHERE tp.user_id = $1`,
+    [techId],
+  );
+  const steps = [
+    { key: 'identity', label: 'Upload ID or a certification', done: s.has_id || s.has_cert, required: true },
+    { key: 'services', label: 'Choose services and declare labor-only for each', done: s.has_services, required: true },
+    { key: 'coverage', label: 'Set your base location and coverage radius', done: s.has_coverage, required: true },
+    { key: 'availability', label: 'Set your weekly availability', done: s.has_availability, required: true },
+    { key: 'portfolio', label: `Add portfolio photos (${s.portfolio_count}/${MAX_PORTFOLIO_ITEMS})`, done: s.portfolio_count > 0, required: false },
+    { key: 'payouts', label: 'Set up payouts', done: s.has_payout, required: false },
+  ];
+  const complete = steps.every((st) => !st.required || st.done);
+  if (complete && !s.onboarding_completed_at) await query('UPDATE technician_profiles SET onboarding_completed_at = now() WHERE user_id = $1', [techId]);
+  res.json({ steps, complete, verificationStatus: s.verification_status });
 });
 
 const PayoutBody = z.object({
@@ -106,7 +253,7 @@ const PayoutBody = z.object({
   returnUrl: z.url().optional(),
 });
 
-/** Creates the technician's payee account on the provider that serves their currency. */
+/** Creates the technician's payee account (for split payments and payouts) on the provider serving their currency. */
 techniciansRouter.post('/technicians/me/payout-account', ...techOnly, async (req, res) => {
   const b = parse(PayoutBody, req.body);
   const user = currentUser(req);
@@ -119,14 +266,16 @@ techniciansRouter.post('/technicians/me/payout-account', ...techOnly, async (req
     email: user.email ?? undefined,
     fullName: user.company_name ?? user.full_name,
     country: b.country,
+    currency: b.currency,
     bank: b.bank,
     returnUrl: b.returnUrl,
   });
-  await query('UPDATE technician_profiles SET payout_provider = $2, payout_account_ref = $3 WHERE user_id = $1', [
-    user.id,
-    providerName,
-    result.accountRef,
-  ]);
+  await query(
+    `UPDATE technician_profiles SET payout_provider = $2, payout_account_ref = $3, payout_recipient_ref = $4, payout_currency = $5,
+            payout_bank_code = $6, payout_account_number = $7
+      WHERE user_id = $1`,
+    [user.id, providerName, result.accountRef, result.recipientRef ?? null, b.currency, b.bank?.bankCode ?? null, b.bank?.accountNumber ?? null],
+  );
   res.status(201).json({ provider: providerName, onboardingUrl: result.onboardingUrl ?? null });
 });
 
@@ -201,7 +350,7 @@ techniciansRouter.get('/technicians/:id', authenticate, requireUser(), async (re
   const id = parse(z.uuid(), req.params.id);
   const profile = await one(
     `SELECT u.id, u.full_name, u.company_name, tp.headline, tp.bio, tp.years_experience, tp.verification_status,
-            tp.rating_avg, tp.rating_count, tp.is_available, tp.labor_stance, tp.instant_book_enabled,
+            tp.rating_avg, tp.rating_count, tp.is_available, tp.instant_book_enabled,
             (SELECT url FROM files f WHERE f.id = tp.avatar_file_id) AS avatar_url
        FROM technician_profiles tp JOIN users u ON u.id = tp.user_id
       WHERE u.id = $1 AND u.is_active`,
@@ -210,7 +359,7 @@ techniciansRouter.get('/technicians/:id', authenticate, requireUser(), async (re
   if (!profile) throw notFound('Technician');
   const [services, portfolio, reviews, certifications, categoryScores, performance] = await Promise.all([
     query(
-      `SELECT c.id, c.name, c.segment, c.icon, ts.base_rate_minor, ts.currency
+      `SELECT c.id, c.name, c.segment, c.icon, ts.base_rate_minor, ts.currency, ts.labor_only_policy
          FROM technician_services ts JOIN service_categories c ON c.id = ts.category_id
         WHERE ts.technician_id = $1 AND c.is_active ORDER BY c.sort_order`,
       [id],
@@ -238,6 +387,7 @@ techniciansRouter.get('/technicians/:id', authenticate, requireUser(), async (re
     ),
     performanceFor([id]),
   ]);
+  const availability = await availabilityOf(id);
   res.json({
     technician: {
       ...profile,
@@ -246,6 +396,7 @@ techniciansRouter.get('/technicians/:id', authenticate, requireUser(), async (re
       certifications,
       categoryScores,
       performance: performance.get(id),
+      availability: { timezone: availability.timezone, availableNow: availability.availableNow, weekly: availability.weekly },
       reviews: reviews.map((r) => ({ ...r, tags: reviewTags(r.scores) })),
     },
   });

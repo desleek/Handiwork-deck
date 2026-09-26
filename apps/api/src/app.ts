@@ -5,6 +5,7 @@ import { pinoHttp } from 'pino-http';
 import { logger } from './lib/logger';
 import { errorHandler, notFoundHandler } from './middleware/errors';
 import { adminRouter } from './routes/admin';
+import { adminPricingRouter } from './routes/adminPricing';
 import { adminTaxonomyRouter } from './routes/adminTaxonomy';
 import { categoriesRouter } from './routes/categories';
 import { chatRouter } from './routes/chat';
@@ -12,7 +13,9 @@ import { discoverRouter } from './routes/discover';
 import { quotesRouter } from './routes/quotes';
 import { adsRouter } from './routes/ads';
 import { healthRouter } from './routes/health';
+import { jobRequestsRouter } from './routes/jobRequests';
 import { jobsRouter } from './routes/jobs';
+import { technicianBusinessRouter } from './routes/technicianBusiness';
 import { paymentsRouter, paymentWebhookRouter } from './routes/payments';
 import { techniciansRouter } from './routes/technicians';
 import { uploadsRouter } from './routes/uploads';
@@ -37,8 +40,10 @@ export function createApp() {
     usersRouter,
     categoriesRouter,
     discoverRouter,
+    technicianBusinessRouter,
     techniciansRouter,
     jobsRouter,
+    jobRequestsRouter,
     quotesRouter,
     chatRouter,
     paymentsRouter,
@@ -46,6 +51,7 @@ export function createApp() {
     adsRouter,
     adminRouter,
     adminTaxonomyRouter,
+    adminPricingRouter,
   );
 
   app.use(notFoundHandler);

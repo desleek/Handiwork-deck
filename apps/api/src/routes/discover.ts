@@ -32,7 +32,8 @@ interface Row {
   rating_avg: number;
   rating_count: number;
   instant_book_enabled: boolean;
-  labor_stance: string;
+  available_now: boolean;
+  labor_only_policy: string;
   live_lat: number | null;
   live_lng: number | null;
   distance_km: number | null;
@@ -57,7 +58,7 @@ discoverRouter.get('/discover', authenticate, requireUser(), async (req, res) =>
   const rows = await query<Row>(
     `WITH candidates AS (
        SELECT u.id, u.full_name, tp.headline, tp.rating_avg::float8 AS rating_avg, tp.rating_count,
-              tp.instant_book_enabled, tp.labor_stance,
+              tp.instant_book_enabled, technician_available_at(tp.user_id, now()) AS available_now,
               (SELECT url FROM files f WHERE f.id = tp.avatar_file_id) AS avatar_url,
               CASE WHEN tp.live_at > now() - make_interval(mins => $8) THEN tp.live_lat END AS live_lat,
               CASE WHEN tp.live_at > now() - make_interval(mins => $8) THEN tp.live_lng END AS live_lng,
@@ -76,13 +77,13 @@ discoverRouter.get('/discover', authenticate, requireUser(), async (req, res) =>
                 2 * 6371 * asin(sqrt(power(sin(radians(l.pos_lat - $3) / 2), 2) +
                   cos(radians($3)) * cos(radians(l.pos_lat)) * power(sin(radians(l.pos_lng - $4) / 2), 2)))
               END AS distance_km,
-              svc.category_id, svc.category_name, svc.category_icon, svc.base_rate_minor AS starting_price_minor, svc.currency,
+              svc.category_id, svc.category_name, svc.category_icon, svc.base_rate_minor AS starting_price_minor, svc.currency, svc.labor_only_policy,
               (SELECT max(b.priority) FROM technician_boosts b
                 WHERE b.technician_id = l.id AND now() BETWEEN b.starts_at AND b.ends_at
                   AND (b.category_id IS NULL OR b.category_id = svc.category_id)) AS boost_priority
          FROM located l
          JOIN LATERAL (
-           SELECT c.id AS category_id, c.name AS category_name, c.icon AS category_icon, ts.base_rate_minor, ts.currency
+           SELECT c.id AS category_id, c.name AS category_name, c.icon AS category_icon, ts.base_rate_minor, ts.currency, ts.labor_only_policy
              FROM technician_services ts JOIN service_categories c ON c.id = ts.category_id
             WHERE ts.technician_id = l.id AND c.is_active
               AND ($1::int IS NULL OR c.id = $1) AND ($2::service_segment IS NULL OR c.segment = $2)
@@ -90,7 +91,7 @@ discoverRouter.get('/discover', authenticate, requireUser(), async (req, res) =>
             LIMIT 1
          ) svc ON true
      )
-     SELECT id, full_name, headline, avatar_url, rating_avg, rating_count, instant_book_enabled, labor_stance,
+     SELECT id, full_name, headline, avatar_url, rating_avg, rating_count, instant_book_enabled, available_now, labor_only_policy,
             round(live_lat::numeric, 3)::float8 AS live_lat, round(live_lng::numeric, 3)::float8 AS live_lng,
             distance_km, category_id, category_name, category_icon, starting_price_minor, currency, boost_priority
        FROM scored
@@ -114,7 +115,9 @@ discoverRouter.get('/discover', authenticate, requireUser(), async (req, res) =>
       distanceKm: r.distance_km == null ? null : Math.round(r.distance_km * 10) / 10,
       livePosition: r.live_lat != null && r.live_lng != null ? { lat: r.live_lat, lng: r.live_lng } : null,
       instantBook: r.instant_book_enabled,
-      laborStance: r.labor_stance,
+      availableNow: r.available_now,
+      /** Labor-only declaration for the card's category. */
+      laborOnly: r.labor_only_policy,
       performance: p,
       boosted: r.boost_priority != null,
       _boostPriority: r.boost_priority ?? -1,

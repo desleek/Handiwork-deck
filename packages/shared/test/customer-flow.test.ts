@@ -1,6 +1,14 @@
 import { describe, expect, it } from 'vitest';
 import {
+  allocateReduction,
   canTransition,
+  commissionFor,
+  DEFAULT_COMMISSION,
+  DEFAULT_MARKUP_CAP_BPS,
+  linesOverCap,
+  nextTierGuidance,
+  priceLine,
+  requiredCustomerRatingCategories,
   DEFAULT_TAXONOMY,
   evaluateCounter,
   maskContactInfo,
@@ -26,6 +34,8 @@ describe('booking transitions', () => {
     expect(canTransition('open', 'assigned', 'customer')).toBe(false);
     expect(canTransition('quoted', 'assigned', 'system')).toBe(true);
     expect(canTransition('quoted', 'assigned', 'technician')).toBe(false);
+    expect(canTransition('assigned', 'open', 'system')).toBe(true);
+    expect(canTransition('assigned', 'open', 'technician')).toBe(false);
   });
 });
 
@@ -70,27 +80,79 @@ describe('contact masking', () => {
 });
 
 describe('quote counters', () => {
+  // labor 20k, parts base 50k + 20% markup 10k
   const totals = quoteTotals([
-    { kind: 'labor', totalMinor: 20_000 },
-    { kind: 'material', totalMinor: 50_000 },
-    { kind: 'transport', totalMinor: 5_000 },
+    priceLine({ kind: 'labor', description: 'Labor', quantity: 1, unitPriceMinor: 20_000 }),
+    priceLine({ kind: 'material', description: 'Cistern', quantity: 1, unitPriceMinor: 50_000, markupBps: 2000 }),
   ]);
-  it('computes totals by kind', () => {
-    expect(totals).toEqual({ labor: 20_000, materials: 50_000, other: 5_000, total: 75_000 });
+  it('computes labor / parts base / markup totals', () => {
+    expect(totals).toEqual({ labor: 20_000, partsBase: 50_000, markup: 10_000, materials: 60_000, total: 80_000 });
   });
-  it('labor-only drops materials unless the technician refuses labor-only work', () => {
-    expect(evaluateCounter(totals, { kind: 'labor_only' }, 'case_by_case')).toEqual({ ok: true, proposedTotal: 25_000 });
-    expect(evaluateCounter(totals, { kind: 'labor_only' }, 'no_labor_only').ok).toBe(false);
+  it('labor-only drops parts unless the technician declined labor-only for the category', () => {
+    expect(evaluateCounter(totals, { kind: 'labor_only' }, 'accept')).toEqual({ ok: true, proposedTotal: 20_000 });
+    expect(evaluateCounter(totals, { kind: 'labor_only' }, 'decline').ok).toBe(false);
   });
-  it('price challenge must undercut the total', () => {
-    expect(evaluateCounter(totals, { kind: 'price_challenge', proposedTotalMinor: 60_000 }, 'case_by_case')).toEqual({ ok: true, proposedTotal: 60_000 });
-    expect(evaluateCounter(totals, { kind: 'price_challenge', proposedTotalMinor: 80_000 }, 'case_by_case').ok).toBe(false);
+  it('price challenge must undercut the total but not the parts base cost', () => {
+    expect(evaluateCounter(totals, { kind: 'price_challenge', proposedTotalMinor: 70_000 }, 'accept')).toEqual({ ok: true, proposedTotal: 70_000 });
+    expect(evaluateCounter(totals, { kind: 'price_challenge', proposedTotalMinor: 90_000 }, 'accept').ok).toBe(false);
+    expect(evaluateCounter(totals, { kind: 'price_challenge', proposedTotalMinor: 45_000 }, 'accept').ok).toBe(false);
   });
   it('labor negotiation only changes the labor portion', () => {
-    expect(evaluateCounter(totals, { kind: 'labor_negotiation', proposedLaborMinor: 15_000 }, 'case_by_case')).toEqual({
+    expect(evaluateCounter(totals, { kind: 'labor_negotiation', proposedLaborMinor: 15_000 }, 'accept')).toEqual({
       ok: true,
-      proposedTotal: 70_000,
+      proposedTotal: 75_000,
       proposedLabor: 15_000,
     });
+  });
+  it('allocates reductions to labor first, then markup, never parts base', () => {
+    expect(allocateReduction(totals, 25_000)).toEqual([
+      { appliesTo: 'labor', amountMinor: -20_000 },
+      { appliesTo: 'markup', amountMinor: -5_000 },
+    ]);
+    expect(() => allocateReduction(totals, 31_000)).toThrow();
+  });
+});
+
+describe('pricing model', () => {
+  it('discloses markup separately on part lines', () => {
+    expect(priceLine({ kind: 'material', description: 'Pipe', quantity: 3, unitPriceMinor: 10_000, markupBps: 1500 })).toEqual({
+      kind: 'material',
+      baseMinor: 30_000,
+      markupBps: 1500,
+      markupMinor: 4_500,
+      totalMinor: 34_500,
+    });
+  });
+  it('charges commission on labor and markup only, never on base part cost', () => {
+    const t = { labor: 100_000, markup: 20_000, total: 220_000 }; // parts base 100k
+    expect(commissionFor(t, DEFAULT_COMMISSION)).toEqual({ laborFee: 18_000, markupFee: 4_000, platformFee: 22_000, technicianPayout: 198_000 });
+  });
+  it('flags part lines above the markup cap', () => {
+    expect(linesOverCap([{ kind: 'labor' }, { kind: 'material', markupBps: 2000 }, { kind: 'material', markupBps: 2500 }], DEFAULT_MARKUP_CAP_BPS)).toEqual([2]);
+  });
+});
+
+describe('next-tier guidance', () => {
+  it('tells new technicians how many jobs remain', () => {
+    const g = nextTierGuidance({ ratingAvg: 0, ratingCount: 0, completedJobs: 1, technicianCancellations: 0, disputes: 0 });
+    expect(g.current.tier).toBe('new');
+    expect(g.actions[0]!.action).toMatch(/Complete 2 more jobs/);
+  });
+  it('shows which improvement reaches the next tier', () => {
+    const g = nextTierGuidance({ ratingAvg: 4.2, ratingCount: 20, completedJobs: 20, technicianCancellations: 3, disputes: 0 });
+    expect(g.current).toMatchObject({ multiplier: 1, tier: 'standard' });
+    expect(g.nextTier).toEqual({ tier: 'trusted', multiplier: 1.05 });
+    const rating = g.actions.find((a) => a.action.includes('4.5'))!;
+    expect(rating).toMatchObject({ resultingMultiplier: 1.1, reachesNextTier: true });
+    const completion = g.actions.find((a) => a.action.includes('95%'))!;
+    expect(completion.action).toMatch(/Complete 37 more jobs/);
+    expect(completion.resultingMultiplier).toBe(1.05);
+  });
+});
+
+describe('customer ratings', () => {
+  it('only asks about materials on labor-only jobs', () => {
+    expect(requiredCustomerRatingCategories(false)).toEqual(['payment', 'scope', 'conduct']);
+    expect(requiredCustomerRatingCategories(true)).toContain('materials');
   });
 });
