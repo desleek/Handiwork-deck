@@ -1,4 +1,4 @@
-import type { CounterKind, LaborStance, QuoteItemKind } from '@handiwork/shared';
+import type { CounterKind, LaborOnlyPolicy, QuoteItemKind } from '@handiwork/shared';
 
 export interface QuoteItem {
   id: string;
@@ -6,7 +6,12 @@ export interface QuoteItem {
   description: string;
   quantity: number;
   unit_price_minor: number;
+  base_minor: number;
+  markup_bps: number;
+  markup_minor: number;
   total_minor: number;
+  applies_to: 'labor' | 'markup' | null;
+  receipt_file_id: string | null;
 }
 
 export interface Counter {
@@ -19,6 +24,16 @@ export interface Counter {
   created_at: string;
 }
 
+export interface CapException {
+  id: string;
+  quote_item_id: string | null;
+  line_description: string;
+  requested_markup_bps: number;
+  cap_bps: number;
+  status: 'pending' | 'approved' | 'declined';
+  admin_note: string | null;
+}
+
 export interface Quote {
   id: string;
   technician_id: string;
@@ -26,17 +41,26 @@ export interface Quote {
   amount_minor: number;
   labor_minor: number;
   materials_minor: number;
+  parts_base_minor: number;
+  markup_minor: number;
   currency: string;
   message: string | null;
   eta_minutes: number | null;
-  status: 'pending' | 'countered' | 'accepted' | 'rejected' | 'withdrawn';
+  status: 'pending' | 'pending_exception' | 'countered' | 'accepted' | 'rejected' | 'withdrawn';
   revision: number;
   labor_only: boolean;
   rating_avg: number;
   rating_count: number;
-  labor_stance: LaborStance;
+  labor_only_policy: LaborOnlyPolicy;
   items: QuoteItem[];
   latest_counter: Counter | null;
+  cap_exceptions: CapException[];
+}
+
+export interface Pricing {
+  markupCapBps: number;
+  commission: { laborBps: number; markupBps: number };
+  receiptThresholdMinor: Record<string, number>;
 }
 
 export const COUNTER_LABEL: Record<CounterKind, string> = {
@@ -45,10 +69,4 @@ export const COUNTER_LABEL: Record<CounterKind, string> = {
   labor_negotiation: 'Negotiate labor',
 };
 
-export const ITEM_KIND_LABEL: Record<QuoteItemKind, string> = {
-  labor: 'Labor',
-  material: 'Materials',
-  transport: 'Transport',
-  other: 'Other',
-  adjustment: 'Adjustment',
-};
+export const pct = (bps: number) => `${(bps / 100).toFixed(bps % 100 ? 1 : 0)}%`;

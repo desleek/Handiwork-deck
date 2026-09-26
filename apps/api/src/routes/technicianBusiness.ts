@@ -8,7 +8,7 @@ import { parse } from '../middleware/validate';
 import { jobs as scheduler } from '../queues/index';
 import { nextStandardBatch, payoutFee } from '../services/payouts';
 import { multiplierFromRow } from '../services/performance';
-import { getSetting } from '../services/settings';
+import { getSetting, markupCapFor } from '../services/settings';
 import { postToWallet } from '../services/wallet';
 
 /** Section 4: earnings dashboard, promotions (Section 16 eligibility), payouts. */
@@ -79,6 +79,17 @@ technicianBusinessRouter.get('/technicians/me/earnings', async (req, res) => {
       tiers: TIER_THRESHOLDS,
     },
   });
+});
+
+/** Pricing rules that apply to this technician's quotes (for the quote builder). */
+technicianBusinessRouter.get('/technicians/me/pricing', async (req, res) => {
+  const techId = currentUser(req).id;
+  const [markupCapBps, commission, receiptThresholdMinor] = await Promise.all([
+    markupCapFor(techId),
+    getSetting('commission'),
+    getSetting('receipt_threshold_minor'),
+  ]);
+  res.json({ markupCapBps, commission, receiptThresholdMinor });
 });
 
 // ---------------------------------------------------------------- promotions

@@ -1,5 +1,5 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { LABOR_STANCE_LABEL, type LaborStance, type PerformanceMultiplier, REVIEW_CATEGORIES, REVIEW_CATEGORY_LABEL } from '@handiwork/shared';
+import { LABOR_ONLY_POLICY_LABEL, type LaborOnlyPolicy, type PerformanceMultiplier, REVIEW_CATEGORIES, REVIEW_CATEGORY_LABEL } from '@handiwork/shared';
 import { router, useLocalSearchParams } from 'expo-router';
 import { useState } from 'react';
 import { Image, ScrollView, Text, View } from 'react-native';
@@ -22,15 +22,17 @@ interface Profile {
   verification_status: string;
   rating_avg: number;
   rating_count: number;
-  labor_stance: LaborStance;
+  availability: { timezone: string; availableNow: boolean; weekly: { day: number; start: string; end: string }[] };
   instant_book_enabled: boolean;
-  services: { id: number; name: string; icon: string | null; base_rate_minor: number | null; currency: string | null }[];
+  services: { id: number; name: string; icon: string | null; base_rate_minor: number | null; currency: string | null; labor_only_policy: LaborOnlyPolicy }[];
   portfolio: { id: string; url: string | null; caption: string | null }[];
   certifications: { title: string; issuer: string | null; is_verified: boolean; expired: boolean }[];
   categoryScores: Record<string, number | null> | null;
   performance: PerformanceMultiplier;
   reviews: { id: string; overall: number; comment: string; reviewer: string; created_at: string; tags: string[]; category_name: string }[];
 }
+
+const DAYS = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
 
 const TIER_LABEL: Record<PerformanceMultiplier['tier'], string> = {
   new: 'New technician',
@@ -85,9 +87,27 @@ export default function TechnicianProfile() {
 
       <Card>
         <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
-          <Ionicons name="construct-outline" size={18} color={colors.ink} />
-          <Text style={{ flex: 1, color: colors.ink }}>{LABOR_STANCE_LABEL[t.labor_stance]}</Text>
+          <Ionicons name={t.availability.availableNow ? 'time' : 'time-outline'} size={18} color={t.availability.availableNow ? colors.success : colors.muted} />
+          <Text style={{ flex: 1, color: colors.ink }}>{t.availability.availableNow ? 'Working now' : 'Not working right now'}</Text>
         </View>
+        {t.availability.weekly.length > 0 && (
+          <Muted>
+            {DAYS.map((d, i) => {
+              const slots = t.availability.weekly.filter((w) => w.day === i);
+              return slots.length ? `${d} ${slots.map((w) => `${w.start}–${w.end}`).join(', ')}` : null;
+            })
+              .filter(Boolean)
+              .join(' · ')}
+          </Muted>
+        )}
+        {service && (
+          <View style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+            <Ionicons name="construct-outline" size={18} color={colors.ink} />
+            <Text style={{ flex: 1, color: colors.ink }}>
+              {service.name}: {LABOR_ONLY_POLICY_LABEL[service.labor_only_policy]}
+            </Text>
+          </View>
+        )}
       </Card>
 
       {t.bio ? <Text style={{ color: colors.ink }}>{t.bio}</Text> : null}

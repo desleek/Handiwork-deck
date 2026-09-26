@@ -6,7 +6,8 @@ export default function AdminTabs() {
     <Tabs screenOptions={tabScreenOptions}>
       <Tabs.Screen name="index" options={{ title: 'Operations', tabBarIcon: tabIcon('pulse') }} />
       <Tabs.Screen name="taxonomy" options={{ title: 'Categories', tabBarIcon: tabIcon('grid') }} />
-      <Tabs.Screen name="verify"options={{ title: 'Verify', tabBarIcon: tabIcon('shield-checkmark') }} />
+      <Tabs.Screen name="exceptions" options={{ title: 'Demand Notices', tabBarIcon: tabIcon('document-text') }} />
+      <Tabs.Screen name="verify" options={{ title: 'Verify', tabBarIcon: tabIcon('shield-checkmark') }} />
       <Tabs.Screen name="ads" options={{ title: 'Ads', tabBarIcon: tabIcon('megaphone') }} />
       <Tabs.Screen name="profile" options={{ title: 'Profile', tabBarIcon: tabIcon('person') }} />
     </Tabs>

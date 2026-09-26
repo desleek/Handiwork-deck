@@ -1,5 +1,5 @@
 import Ionicons from '@expo/vector-icons/Ionicons';
-import { LABOR_STANCE_LABEL, LABOR_STANCES, type LaborStance, SERVICE_SEGMENTS, type ServiceSegment, toMajor, toMinor } from '@handiwork/shared';
+import { type LaborOnlyPolicy, SERVICE_SEGMENTS, type ServiceSegment, toMajor, toMinor } from '@handiwork/shared';
 import * as ImagePicker from 'expo-image-picker';
 import * as Location from 'expo-location';
 import { router } from 'expo-router';
@@ -8,7 +8,7 @@ import { useEffect, useState } from 'react';
 import { Image, Pressable, Switch, Text, View } from 'react-native';
 import { ProfileScreen } from '@/components/ProfileScreen';
 import { Badge, Button, Card, Chip, colors, ErrorText, Field, Muted, styles } from '@/components/ui';
-import { api, uploadFile } from '@/lib/api';
+import { api, ApiError, uploadFile } from '@/lib/api';
 import { useAuth } from '@/lib/auth';
 import { type Category, SEGMENT_LABEL } from '@/lib/categories';
 import { useApi } from '@/lib/useApi';
@@ -19,9 +19,8 @@ interface TechProfile {
   verification_status: string;
   is_available: boolean;
   headline: string | null;
-  labor_stance: LaborStance;
   instant_book_enabled: boolean;
-  services: { id: number; base_rate_minor: number | null; currency: string | null }[];
+  services: { id: number; base_rate_minor: number | null; currency: string | null; labor_only_policy: LaborOnlyPolicy }[];
   portfolio: { id: string; url: string | null }[];
   certifications: { title: string; issuer: string | null; is_verified: boolean }[];
 }
@@ -31,6 +30,11 @@ export default function TechnicianProfile() {
   const { data: cats } = useApi<{ categories: Category[] }>('/categories');
   const { data: me, reload } = useApi<{ technician: TechProfile }>(user ? `/technicians/${user.id}` : null);
   const [rates, setRates] = useState<Record<number, string>>({}); // selected category -> starting price (major units)
+  const [laborOnly, setLaborOnly] = useState<Record<number, LaborOnlyPolicy | undefined>>({}); // selected category -> declaration
+  const { data: onboarding, reload: reloadOnboarding } = useApi<{ steps: { key: string; label: string; done: boolean; required: boolean }[]; complete: boolean }>(
+    '/technicians/me/onboarding',
+  );
+  const [suggestLaborOnly, setSuggestLaborOnly] = useState<LaborOnlyPolicy | null>(null);
   const [currency, setCurrency] = useState('NGN');
   const [segment, setSegment] = useState<ServiceSegment>('household_office');
   const [radius, setRadius] = useState('15');
@@ -49,6 +53,7 @@ export default function TechnicianProfile() {
   useEffect(() => {
     if (!t) return;
     setRates(Object.fromEntries(t.services.map((s) => [s.id, s.base_rate_minor != null ? String(toMajor(s.base_rate_minor, s.currency ?? 'NGN')) : ''])));
+    setLaborOnly(Object.fromEntries(t.services.map((s) => [s.id, s.labor_only_policy])));
     if (t.services[0]?.currency) setCurrency(t.services[0].currency);
     setHeadline(t.headline ?? '');
   }, [t]);
@@ -60,7 +65,7 @@ export default function TechnicianProfile() {
     try {
       const m = await fn();
       if (m) setMsg(m);
-      await reload();
+      await Promise.all([reload(), reloadOnboarding()]);
     } catch (e) {
       setError(e);
     } finally {
@@ -88,9 +93,19 @@ export default function TechnicianProfile() {
         categoryId: Number(categoryId),
         baseRateMinor: rate ? toMinor(Number(rate), currency) : undefined,
         currency: rate ? currency : undefined,
+        laborOnly: laborOnly[Number(categoryId)],
       }));
-      await api('/technicians/me/services', { method: 'PUT', body: { services } });
-      return 'Services and starting prices saved';
+      if (services.some((s) => !s.laborOnly)) throw new Error('Declare labor-only (accept or decline) for every service');
+      try {
+        await api('/technicians/me/services', { method: 'PUT', body: { services } });
+      } catch (e) {
+        if (e instanceof ApiError && e.code === 'labor_only_cooldown') {
+          const d = e.details as { nextChangeAllowedAt: string };
+          throw new Error(`${e.message}. You can switch again on ${new Date(d.nextChangeAllowedAt).toLocaleDateString()}.`);
+        }
+        throw e;
+      }
+      return 'Services, labor-only declarations and starting prices saved';
     });
 
   const setupPayouts = () =>
@@ -111,6 +126,20 @@ export default function TechnicianProfile() {
 
   return (
     <ProfileScreen>
+      {onboarding && !onboarding.complete && (
+        <Card style={{ borderColor: colors.primary, borderWidth: 1.5 }}>
+          <Text style={styles.label}>Finish setting up</Text>
+          {onboarding.steps.map((st) => (
+            <View key={st.key} style={{ flexDirection: 'row', gap: 8, alignItems: 'center' }}>
+              <Ionicons name={st.done ? 'checkmark-circle' : 'ellipse-outline'} size={18} color={st.done ? colors.success : colors.muted} />
+              <Text style={{ flex: 1, color: colors.ink }}>
+                {st.label}
+                {st.required ? '' : ' (optional)'}
+              </Text>
+            </View>
+          ))}
+        </Card>
+      )}
       <Card>
         <View style={{ flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center' }}>
           <Text style={styles.label}>Verification</Text>
@@ -128,15 +157,7 @@ export default function TechnicianProfile() {
           </View>
           <Switch value={t?.instant_book_enabled ?? false} onValueChange={(v) => run('instant', async () => void (await put({ instantBookEnabled: v })))} />
         </View>
-        <Button title="Wallet & earnings" variant="secondary" onPress={() => router.push('/wallet')} />
-      </Card>
-
-      <Card>
-        <Text style={styles.label}>Labor-only jobs</Text>
-        <Muted>Can customers supply the materials and pay you for labor only?</Muted>
-        {LABOR_STANCES.map((s) => (
-          <Chip key={s} label={LABOR_STANCE_LABEL[s]} selected={t?.labor_stance === s} onPress={() => run('stance', async () => void (await put({ laborStance: s })))} />
-        ))}
+        <Button title="Availability calendar" variant="secondary" onPress={() => router.push('/availability')} />
       </Card>
 
       <Card>
@@ -195,26 +216,37 @@ export default function TechnicianProfile() {
         {Object.keys(rates).map((cid) => {
           const cat = cats?.categories.find((c) => c.id === Number(cid));
           return (
-            <Field
-              key={cid}
-              label={`${cat?.name ?? 'Service'} — starting price (${currency})`}
-              value={rates[Number(cid)]}
-              onChangeText={(v) => setRates((r) => ({ ...r, [Number(cid)]: v }))}
-              keyboardType="decimal-pad"
-              placeholder="Optional"
-            />
+            <View key={cid} style={{ gap: 6, borderTopWidth: 1, borderColor: colors.line, paddingTop: 8 }}>
+              <Text style={{ fontWeight: '600', color: colors.ink }}>{cat?.name ?? 'Service'}</Text>
+              <Muted>Labor-only (customer supplies materials)? This is permanent unless switched, and switches have a cooldown.</Muted>
+              <View style={styles.row}>
+                <Chip label="Accept" selected={laborOnly[Number(cid)] === 'accept'} onPress={() => setLaborOnly((l) => ({ ...l, [Number(cid)]: 'accept' }))} />
+                <Chip label="Decline from inception" selected={laborOnly[Number(cid)] === 'decline'} onPress={() => setLaborOnly((l) => ({ ...l, [Number(cid)]: 'decline' }))} />
+              </View>
+              <Field
+                label={`Starting price (${currency})`}
+                value={rates[Number(cid)]}
+                onChangeText={(v) => setRates((r) => ({ ...r, [Number(cid)]: v }))}
+                keyboardType="decimal-pad"
+                placeholder="Optional"
+              />
+            </View>
           );
         })}
         <Button title="Save services" loading={busy === 'services'} disabled={!Object.keys(rates).length} onPress={saveServices} />
         <Muted>Trade not listed?</Muted>
         <Field label="Suggest a trade" value={suggestion} onChangeText={setSuggestion} placeholder="e.g. Swimming pool maintenance" />
+        <View style={styles.row}>
+          <Chip label="Labor-only: accept" selected={suggestLaborOnly === 'accept'} onPress={() => setSuggestLaborOnly('accept')} />
+          <Chip label="Labor-only: decline" selected={suggestLaborOnly === 'decline'} onPress={() => setSuggestLaborOnly('decline')} />
+        </View>
         <Button
           title="Send suggestion"
           variant="secondary"
-          disabled={suggestion.trim().length < 3}
+          disabled={suggestion.trim().length < 3 || !suggestLaborOnly}
           onPress={() =>
             run('suggest', async () => {
-              await api('/categories/suggestions', { body: { name: suggestion.trim(), segment } });
+              await api('/categories/suggestions', { body: { name: suggestion.trim(), segment, laborOnly: suggestLaborOnly } });
               setSuggestion('');
               return "Thanks — we'll add it to your profile once approved.";
             })

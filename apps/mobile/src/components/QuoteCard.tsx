@@ -1,31 +1,66 @@
 import { type CounterKind, toMinor } from '@handiwork/shared';
 import { router } from 'expo-router';
+import type React from 'react';
 import { useState } from 'react';
 import { Text, View } from 'react-native';
 import { api } from '@/lib/api';
 import { formatMoney } from '@/lib/format';
-import { COUNTER_LABEL, type Quote } from '@/lib/quotes';
+import { COUNTER_LABEL, pct, type Quote } from '@/lib/quotes';
 import { RatingLine } from './Stars';
 import { Badge, Button, Card, Chip, colors, ErrorText, Field, Muted, styles } from './ui';
 
-function Breakdown({ quote }: { quote: Quote }) {
+/** Labor and Parts/Materials as separate sections; each part discloses base cost, markup % and amount. */
+export function Breakdown({ quote }: { quote: Quote }) {
+  const labor = quote.items.filter((i) => i.kind === 'labor');
+  const parts = quote.items.filter((i) => i.kind === 'material');
+  const adjustments = quote.items.filter((i) => i.kind === 'adjustment');
+  const row = (left: React.ReactNode, right: string, color: string = colors.ink, key?: string) => (
+    <View key={key} style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8 }}>
+      <Text style={{ flex: 1, color }}>{left}</Text>
+      <Text style={{ color }}>{right}</Text>
+    </View>
+  );
+  const exceptionFor = (itemId: string) => quote.cap_exceptions?.find((e) => e.quote_item_id === itemId);
   return (
     <View style={{ gap: 4 }}>
-      {quote.items.map((i) => (
-        <View key={i.id} style={{ flexDirection: 'row', justifyContent: 'space-between', gap: 8 }}>
-          <Text style={{ flex: 1, color: i.kind === 'adjustment' ? colors.success : colors.ink }}>
+      <Text style={{ fontSize: 12, fontWeight: '700', color: colors.muted }}>LABOR</Text>
+      {labor.map((i) =>
+        row(
+          <>
             {i.description}
             {i.quantity !== 1 ? <Text style={{ color: colors.muted }}> × {i.quantity}</Text> : null}
-            <Text style={{ color: colors.muted, fontSize: 12 }}> · {i.kind}</Text>
-          </Text>
-          <Text style={{ color: i.kind === 'adjustment' ? colors.success : colors.ink }}>{formatMoney(i.total_minor, quote.currency)}</Text>
-        </View>
-      ))}
-      <View style={{ borderTopWidth: 1, borderColor: colors.line, paddingTop: 4, flexDirection: 'row', justifyContent: 'space-between' }}>
+          </>,
+          formatMoney(i.total_minor, quote.currency),
+          colors.ink,
+          i.id,
+        ),
+      )}
+      {parts.length > 0 && <Text style={{ fontSize: 12, fontWeight: '700', color: colors.muted, marginTop: 4 }}>PARTS / MATERIALS</Text>}
+      {parts.map((i) => {
+        const ex = exceptionFor(i.id);
+        return (
+          <View key={i.id} style={{ gap: 1 }}>
+            {row(
+              <>
+                {i.description}
+                {i.quantity !== 1 ? <Text style={{ color: colors.muted }}> × {i.quantity}</Text> : null}
+              </>,
+              formatMoney(i.base_minor, quote.currency),
+            )}
+            {i.markup_minor > 0 && row(<Text style={{ color: colors.muted }}>  Markup {pct(i.markup_bps)}</Text>, formatMoney(i.markup_minor, quote.currency), colors.muted)}
+            {ex && ex.status !== 'approved' && (
+              <Badge label={ex.status === 'pending' ? `Markup ${pct(ex.requested_markup_bps)} under review` : `Exception declined — capped at ${pct(ex.cap_bps)}`} tone={ex.status === 'pending' ? 'warn' : 'bad'} />
+            )}
+            {ex?.status === 'approved' && <Badge label={`Markup ${pct(ex.requested_markup_bps)} approved by HANDIWORK`} tone="good" />}
+          </View>
+        );
+      })}
+      {adjustments.map((i) => row(i.description, formatMoney(i.total_minor, quote.currency), colors.success, i.id))}
+      <View style={{ borderTopWidth: 1, borderColor: colors.line, paddingTop: 4, gap: 2 }}>
         <Muted>
-          Labor {formatMoney(quote.labor_minor, quote.currency)} · Materials {formatMoney(quote.materials_minor, quote.currency)}
+          Labor {formatMoney(quote.labor_minor, quote.currency)} · Parts {formatMoney(quote.parts_base_minor, quote.currency)} · Markup {formatMoney(quote.markup_minor, quote.currency)}
         </Muted>
-        <Text style={{ fontWeight: '800' }}>{formatMoney(quote.amount_minor, quote.currency)}</Text>
+        <Text style={{ fontWeight: '800', textAlign: 'right' }}>{formatMoney(quote.amount_minor, quote.currency)}</Text>
       </View>
     </View>
   );
@@ -66,7 +101,7 @@ export function CustomerQuoteCard({ jobId, quote, open, onChange }: { jobId: str
   };
 
   const pendingCounter = quote.latest_counter?.status === 'pending' ? quote.latest_counter : null;
-  const laborOnlyAllowed = quote.labor_stance !== 'no_labor_only' && quote.materials_minor > 0;
+  const laborOnlyAllowed = quote.labor_only_policy === 'accept' && quote.materials_minor > 0;
 
   const sendCounter = () =>
     run('counter', () =>
@@ -96,6 +131,7 @@ export function CustomerQuoteCard({ jobId, quote, open, onChange }: { jobId: str
       {quote.message ? <Text style={{ color: colors.ink }}>{quote.message}</Text> : null}
       <Breakdown quote={quote} />
       <CounterStatus quote={quote} />
+      {quote.status === 'pending_exception' && <Muted>This quote includes a markup above our cap and is being reviewed by HANDIWORK. You can approve it once the review is done.</Muted>}
 
       <Button title="Chat" variant="secondary" onPress={() => router.push({ pathname: '/chat/[jobId]', params: { jobId, technicianId: quote.technician_id, name: quote.technician_name } })} />
 
@@ -107,7 +143,7 @@ export function CustomerQuoteCard({ jobId, quote, open, onChange }: { jobId: str
             <Chip label="Challenge price" onPress={() => setCounterKind('price_challenge')} />
             {quote.labor_minor > 0 && <Chip label="Negotiate labor" onPress={() => setCounterKind('labor_negotiation')} />}
           </View>
-          {quote.labor_stance === 'no_labor_only' && <Muted>This technician supplies their own materials (no labor-only).</Muted>}
+          {quote.labor_only_policy === 'decline' && <Muted>This technician declared no labor-only work for this service.</Muted>}
         </>
       )}
 
@@ -173,9 +209,19 @@ export function TechnicianQuoteCard({ jobId, quote, onRevise, onChange }: { jobI
     <Card>
       <View style={{ flexDirection: 'row', justifyContent: 'space-between' }}>
         <Text style={styles.label}>Your quote (rev {quote.revision})</Text>
-        <Badge label={quote.status} tone={quote.status === 'accepted' ? 'good' : quote.status === 'rejected' ? 'bad' : 'neutral'} />
+        <Badge
+          label={quote.status === 'pending_exception' ? 'cap exception under review' : quote.status}
+          tone={quote.status === 'accepted' ? 'good' : quote.status === 'rejected' ? 'bad' : quote.status === 'pending_exception' ? 'warn' : 'neutral'}
+        />
       </View>
       <Breakdown quote={quote} />
+      {quote.cap_exceptions
+        ?.filter((e) => e.admin_note)
+        .map((e) => (
+          <Muted key={e.id}>
+            Admin note on “{e.line_description}”: {e.admin_note}
+          </Muted>
+        ))}
       {c && (
         <View style={{ gap: 6, backgroundColor: '#FEF3C7', padding: 10, borderRadius: 8 }}>
           <Text style={{ fontWeight: '700', color: '#92400E' }}>
@@ -191,7 +237,7 @@ export function TechnicianQuoteCard({ jobId, quote, onRevise, onChange }: { jobI
         </View>
       )}
       {!c && quote.latest_counter?.status === 'declined' && <Muted>You declined the customer's last counter-offer.</Muted>}
-      {['pending', 'countered'].includes(quote.status) && <Button title="Revise quote" variant="secondary" onPress={onRevise} />}
+      {['pending', 'pending_exception', 'countered'].includes(quote.status) && <Button title="Revise quote" variant="secondary" onPress={onRevise} />}
       <ErrorText error={error} />
     </Card>
   );

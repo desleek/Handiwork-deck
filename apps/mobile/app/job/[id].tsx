@@ -7,6 +7,8 @@ import { AdSlot } from '@/components/AdSlot';
 import { LiveMap } from '@/components/LiveMap';
 import { PaymentPicker } from '@/components/PaymentPicker';
 import { QuoteBuilder } from '@/components/QuoteBuilder';
+import { CustomerRatingForm } from '@/components/CustomerRatingForm';
+import { InvoiceCard } from '@/components/InvoiceCard';
 import { CustomerQuoteCard, TechnicianQuoteCard } from '@/components/QuoteCard';
 import { ReviewForm } from '@/components/ReviewForm';
 import { Badge, Button, colors, ErrorText, Loading, Muted, Screen, styles, Title } from '@/components/ui';
@@ -35,12 +37,16 @@ interface Job {
   custom_service_name: string | null;
   awaiting_category_review: boolean;
   labor_only: boolean;
+  target_technician_id: string | null;
+  request_accepted_at: string | null;
 }
 interface Detail {
   job: Job;
   quotes: Quote[];
   history: { to_status: JobStatus; note: string | null; created_at: string }[];
   review: { overall: number; comment: string } | null;
+  customer?: { first_name: string; customer_type: string; rating_avg: number; rating_count: number };
+  customerRating?: { overall: number } | null;
   whatsappLink: string | null;
 }
 
@@ -95,6 +101,45 @@ export default function JobDetail() {
       <Muted>{job.address}</Muted>
       {job.description ? <Text style={{ color: colors.ink }}>{job.description}</Text> : null}
       {job.budget_minor != null && <Text style={{ fontWeight: '600' }}>{formatMoney(job.budget_minor, job.currency)}</Text>}
+      {user.role === 'technician' && data.customer && (
+        <Muted>
+          Customer: {data.customer.first_name} ({data.customer.customer_type}) ·{' '}
+          {data.customer.rating_count ? `agreement compliance ★ ${Number(data.customer.rating_avg).toFixed(1)} from ${data.customer.rating_count} job(s)` : 'no compliance ratings yet'}
+        </Muted>
+      )}
+
+      {/* ---------- technician: booking requests & instant bookings addressed to me ---------- */}
+      {user.role === 'technician' && job.booking_mode === 'request' && job.target_technician_id === user.id && negotiating && (
+        <View style={{ gap: 8 }}>
+          <Text style={styles.label}>{job.request_accepted_at ? 'You accepted this request — send your quote below' : 'Booking request for you'}</Text>
+          {!job.request_accepted_at && (
+            <Button title="Accept request" loading={busy === 'req-accept'} onPress={() => act('req-accept', () => api(`/jobs/${job.id}/request/accept`, { method: 'POST' }))} />
+          )}
+          <Button
+            title="Decline request"
+            variant="secondary"
+            onPress={() => act('req-decline', async () => {
+              await api(`/jobs/${job.id}/request/decline`, { method: 'POST' });
+              router.back();
+            })}
+          />
+        </View>
+      )}
+      {isTech && job.booking_mode === 'instant' && job.status === 'assigned' && (
+        <Button
+          title="Can't make it — decline instant booking"
+          variant="secondary"
+          onPress={() =>
+            Alert.alert('Decline this instant booking?', 'The job goes back to other technicians. Frequent declines affect your performance.', [
+              { text: 'Keep it' },
+              { text: 'Decline', style: 'destructive', onPress: () => void act('instant-decline', async () => (await api(`/jobs/${job.id}/instant/decline`, { method: 'POST' }), router.back())) },
+            ])
+          }
+        />
+      )}
+      {user.role === 'technician' && negotiating && !myQuote && job.target_technician_id !== user.id && (
+        <Button title="Not interested" variant="secondary" onPress={() => act('dismiss', async () => (await api(`/jobs/${job.id}/dismiss`, { method: 'POST' }), router.back()))} />
+      )}
 
       {(job.status === 'en_route' || job.status === 'in_progress') && isCustomer && <LiveMap jobId={job.id} job={job} />}
 
@@ -159,11 +204,16 @@ export default function JobDetail() {
       )}
       {isTech && job.status === 'in_progress' && <Button title="Mark job completed" loading={busy === 'completed'} onPress={() => setStatus('completed')} />}
 
+      {(isCustomer || isTech || user.role === 'admin') && !negotiating && job.status !== 'cancelled' && job.technician_id && <InvoiceCard jobId={job.id} isTech={isTech} />}
+
       {/* ---------- customer: pay & mandatory review ---------- */}
       {isCustomer && job.status === 'completed' && job.budget_minor != null && (
         <PaymentPicker jobId={job.id} amountMinor={job.budget_minor} currency={job.currency} onPaid={reload} />
       )}
       {isCustomer && (job.status === 'completed' || job.status === 'paid') && !data.review && <ReviewForm jobId={job.id} onDone={reload} />}
+      {isTech && (job.status === 'completed' || job.status === 'paid') && data.customerRating === null && (
+        <CustomerRatingForm jobId={job.id} laborOnly={job.labor_only} onDone={reload} />
+      )}
       {data.review && (
         <Muted>
           Your review: ★ {Number(data.review.overall).toFixed(1)} — “{data.review.comment}”
@@ -190,6 +240,9 @@ export default function JobDetail() {
       <ErrorText error={actionError} />
       <AdSlot categoryId={job.category_id} />
 
+      {(isCustomer || isTech || user.role === 'admin') && (
+        <Button title="Audit trail" variant="secondary" onPress={() => router.push(`/job/audit/${job.id}`)} />
+      )}
       <Text style={styles.label}>Timeline</Text>
       {data.history.map((h, i) => (
         <Muted key={i}>

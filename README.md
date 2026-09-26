@@ -154,6 +154,68 @@ Each supercategory has one **"Other / custom"** entry:
   categories (quality, punctuality, communication, value, professionalism) and write at
   least 10 characters. Until they do, `POST /jobs` returns `409 review_required`.
 
+### Technician flow (Section 4)
+
+- **Onboarding checklist** (`GET /technicians/me/onboarding`). The required steps are:
+  upload an ID or certification, choose services with a labor-only declaration for each,
+  set a base location and coverage radius, and set weekly availability. Portfolio (max 5)
+  and payouts are optional.
+- **Labor-only declarations** are made per category ("Accept" or "Decline from
+  inception"). They are permanent unless switched, and a switch is allowed once every
+  `labor_only_cooldown_days` (default 90). The declarations are stored in an append-only
+  log, so dropping and re-adding a service doesn't reset the cooldown.
+- **Availability calendar:** weekly hours per day, a time zone, and time off.
+  `technician_available_at()` in SQL gates matching, instant booking and the "off hours"
+  label on discovery cards.
+- **Job requests:** a technician can accept or decline a booking request (declining sends
+  it to the marketplace straight away), decline an instant booking (the job goes from
+  `assigned` back to `open`), or dismiss a job from their feed.
+- **Earnings dashboard** (`GET /technicians/me/earnings`) shows:
+  - gross, commission and net earnings, split into labor, parts reimbursed and markup;
+  - work still in progress and the wallet balance;
+  - the performance multiplier, what drives it, the tier thresholds, and which
+    improvement would reach the next tier (`nextTierGuidance`).
+- **Promotions:** visibility boosts and priority job alerts, which widen a technician's
+  alert radius (2× reach). They are paid from the wallet. Prices and eligibility rules are
+  admin settings (`promotions`); eligibility requires a verified account, a tier that
+  isn't under review, a rating floor, and no open disputes.
+- **Payouts:** standard payouts are free and go out in the next daily batch. Instant
+  payouts are sent immediately for a fee. They go through Paystack transfers, Flutterwave
+  transfers or a Stripe transfer (plus an instant payout for Stripe). If a transfer fails,
+  the amount and fee go back to the wallet.
+- **Customer ratings:** after a job, technicians score customers on paid as agreed, kept to
+  scope, conduct, and (for labor-only jobs) supplied materials. Technicians see a
+  customer's average on future jobs.
+
+### Pricing model (Section 5)
+
+- Every quote and invoice lists **Labor** and **Parts/Materials** separately. Each part
+  line shows its base cost, markup % and markup amount. A quote must have at least one
+  labor line.
+- **Markup cap:** default 20% (`markup_cap_bps`). The API rejects anything above it
+  (`422 markup_cap_exceeded`) unless a Demand Notice is attached. The quote builder blocks
+  it in the app too.
+- **Receipts:** any part whose base cost is at or above the per-currency threshold (default
+  ₦50k / $50, `receipt_threshold_minor`) needs a receipt before the job can be marked
+  completed (`409 receipts_required`).
+- **Commission:** 18% of labor plus 20% of markup, and 0% of the base part cost
+  (`commission`). The rates are copied onto the job when a quote is accepted, so changing
+  them later doesn't re-price work that's already agreed. Negotiated reductions come out of
+  labor first, then markup, and never out of part cost.
+- Admins change all of these in the app under **Profile → Pricing & platform settings**,
+  or with `GET/PUT /admin/settings/:key`.
+
+### Demand Notice — markup cap exceptions (Section 5a)
+
+- A part line above the cap carries a `capException` with a reason and evidence files. The
+  quote is saved as `pending_exception` and the customer is told it's under review. They
+  can't approve or counter it until the review is done.
+- Admins handle cases in the **Demand Notices** tab. Approving applies the markup to that
+  quote revision only. Declining cuts the line back to the cap. Either way the admin can
+  add a note. A **permanent per-technician cap override** is a separate action.
+- Every request, evidence file and decision is logged in the job's audit trail
+  (`GET /jobs/:id/audit`, and the Audit trail screen in the app).
+
 ### WhatsApp relay
 
 Customers and technicians message the **platform's** WhatsApp number. Neither side sees the
@@ -213,15 +275,17 @@ with a warning.
 | Account | `POST /auth/register`, `GET/PATCH /me`, `POST /me/push-tokens`, `GET /me/pending-reviews` |
 | Taxonomy | `GET /categories`, `POST /categories/suggestions` |
 | Discovery | `GET /discover` |
+| Technician (self) | `GET /technicians/me/onboarding`, `GET/PUT /technicians/me/availability`, `POST/DELETE /technicians/me/time-off`, `PUT /technicians/me/services/:categoryId/labor-only`, `GET /technicians/me/pricing`, `GET /technicians/me/earnings`, `GET/POST /technicians/me/promotions`, `GET /technicians/me/payouts[/quote]`, `POST /technicians/me/payouts` |
 | Technicians | `PUT /technicians/me`, `PUT /technicians/me/presence`, `PUT /technicians/me/services`, `POST /technicians/me/payout-account`, `POST/DELETE /technicians/me/portfolio`, `POST/DELETE /technicians/me/certifications`, `GET /technicians/:id` |
 | Jobs | `POST /jobs`, `GET /jobs[?feed=nearby]`, `GET /jobs/:id`, `POST /jobs/:id/status`, `POST /jobs/:id/review` |
-| Quotes | `POST /jobs/:id/quotes`, `PUT /jobs/:id/quotes/:quoteId`, `POST …/withdraw`, `POST …/accept`, `POST …/counter`, `POST …/counters/:counterId/respond`, `POST …/counters/:counterId/withdraw` |
+| Job requests | `POST /jobs/:id/request/accept`, `POST /jobs/:id/request/decline`, `POST /jobs/:id/instant/decline`, `POST /jobs/:id/dismiss`, `GET /jobs/:id/invoice`, `GET /jobs/:id/audit`, `POST /jobs/:id/customer-rating` |
+| Quotes | `POST /jobs/:id/quotes`, `PUT /jobs/:id/quotes/:quoteId`, `POST …/items/:itemId/receipt`, `POST …/withdraw`, `POST …/accept`, `POST …/counter`, `POST …/counters/:counterId/respond`, `POST …/counters/:counterId/withdraw` |
 | Chat | `GET /jobs/:id/conversations`, `GET/POST /jobs/:id/messages` |
 | Payments | `GET /payments/options`, `POST /jobs/:id/payments`, `GET /wallet`, `POST /wallet/topups`, `POST /webhooks/payments/:provider` |
 | WhatsApp | `GET/POST /webhooks/whatsapp` |
 | Files | `POST /uploads`, `POST /uploads/:id/complete` |
 | Ads | `POST /ads`, `GET /ads/mine`, `POST /ads/:id/status`, `GET /ads/placements`, `POST /ads/:id/click` |
-| Admin | `GET/POST/PATCH /admin/categories`, `GET /admin/category-suggestions`, `POST …/:id/approve`, `POST …/:id/reject`, `GET/POST/DELETE /admin/boosts`, `POST /admin/certifications/:id/verify`, `GET /admin/stats`, `GET /admin/technicians`, `POST /admin/technicians/:id/verification`, `POST /admin/users/:id/active`, `GET /admin/escalations`, `POST /admin/escalations/:id/resolve`, `GET /admin/ads`, `POST /admin/ads/:id/review`, `POST /admin/payments/:id/refund` |
+| Admin | `GET /admin/cap-exceptions`, `POST /admin/cap-exceptions/:id/decide`, `PUT /admin/technicians/:id/markup-cap`, `GET /admin/settings`, `PUT /admin/settings/:key`, `GET/POST/PATCH /admin/categories`, `GET /admin/category-suggestions`, `POST …/:id/approve`, `POST …/:id/reject`, `GET/POST/DELETE /admin/boosts`, `POST /admin/certifications/:id/verify`, `GET /admin/stats`, `GET /admin/technicians`, `POST /admin/technicians/:id/verification`, `POST /admin/users/:id/active`, `GET /admin/escalations`, `POST /admin/escalations/:id/resolve`, `GET /admin/ads`, `POST /admin/ads/:id/review`, `POST /admin/payments/:id/refund` |
 
 ## Deployment notes
 
@@ -243,10 +307,12 @@ with a warning.
 - **Escrow:** funds are split when the customer pays, after the job is marked completed.
   Holding funds until the customer confirms would mean moving Stripe to separate charges
   and transfers and using delayed settlement on Paystack/Flutterwave.
-- **Boost purchases:** the data model and ranking are in place, but admins grant boosts by
-  hand. Self-serve purchase comes with Section 16.
-- **Wallet withdrawals:** technicians can see what they've earned, but can't pay it out to
-  their bank yet.
+- **Section 16 specifics:** boosts and alerts can be bought from the wallet, with
+  eligibility checks that are placeholders until Section 16 arrives. Paying for them
+  through a gateway isn't wired up yet.
+- **Payout confirmation webhooks:** a payout is marked `sent` when the provider accepts the
+  transfer. Webhooks for final settlement (such as Paystack `transfer.success`) aren't
+  handled yet.
 - **Ad billing:** impressions and clicks are counted, but `spent_minor` isn't charged yet.
 - **Search at scale:** matching uses haversine in SQL. Move to PostGIS with a GiST index when
   volume calls for it.

@@ -6,6 +6,7 @@ export default function TechnicianTabs() {
     <Tabs screenOptions={tabScreenOptions}>
       <Tabs.Screen name="index" options={{ title: 'Job feed', tabBarIcon: tabIcon('flash') }} />
       <Tabs.Screen name="jobs" options={{ title: 'My jobs', tabBarIcon: tabIcon('briefcase') }} />
+      <Tabs.Screen name="earnings" options={{ title: 'Earnings', tabBarIcon: tabIcon('cash') }} />
       <Tabs.Screen name="profile" options={{ title: 'Profile', tabBarIcon: tabIcon('person') }} />
     </Tabs>
   );

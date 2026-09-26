@@ -11,7 +11,8 @@ export interface TechCardData {
   distanceKm: number | null;
   livePosition: { lat: number; lng: number } | null;
   instantBook: boolean;
-  laborStance: string;
+  availableNow: boolean;
+  laborOnly: 'accept' | 'decline';
   performance: PerformanceMultiplier;
   boosted: boolean;
 }

@@ -66,7 +66,11 @@ export function TechCard({ tech }: { tech: TechCardData }) {
             <Text style={{ color: colors.muted }}>Quote on request</Text>
           )}
         </Text>
-        {tech.instantBook && <Text style={{ fontSize: 11, color: colors.success, fontWeight: '600' }}>⚡ Instant book</Text>}
+        <View style={{ flexDirection: 'row', gap: 6, flexWrap: 'wrap' }}>
+          {tech.instantBook && <Text style={{ fontSize: 11, color: colors.success, fontWeight: '600' }}>⚡ Instant book</Text>}
+          {!tech.availableNow && <Text style={{ fontSize: 11, color: colors.muted }}>Off hours</Text>}
+          {tech.laborOnly === 'accept' && <Text style={{ fontSize: 11, color: colors.muted }}>Labor-only OK</Text>}
+        </View>
       </View>
     </Pressable>
   );
