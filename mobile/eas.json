@@ -1,0 +1,25 @@
+{
+  "cli": { "version": ">= 12.0.0", "appVersionSource": "remote" },
+  "build": {
+    "development": {
+      "developmentClient": true,
+      "distribution": "internal",
+      "env": { "EXPO_PUBLIC_AUTH_MODE": "dev" }
+    },
+    "preview": {
+      "distribution": "internal",
+      "android": { "buildType": "apk" },
+      "env": { "EXPO_PUBLIC_API_URL": "https://staging-api.handiworkdeck.com" }
+    },
+    "production": {
+      "autoIncrement": true,
+      "env": { "EXPO_PUBLIC_API_URL": "https://api.handiworkdeck.com" }
+    }
+  },
+  "submit": {
+    "production": {
+      "ios": { "ascAppId": "REPLACE_WITH_APP_STORE_CONNECT_APP_ID" },
+      "android": { "track": "internal", "releaseStatus": "draft" }
+    }
+  }
+}

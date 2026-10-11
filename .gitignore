@@ -1,0 +1,20 @@
+node_modules/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+
+# Expo / React Native
+mobile/.expo/
+mobile/dist/
+mobile/ios/
+mobile/android/
+mobile/google-services.json
+mobile/GoogleService-Info.plist
+mobile/expo-env.d.ts
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
