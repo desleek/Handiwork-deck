@@ -50,7 +50,24 @@ Turn features on with `PUT /admin/settings/features`, e.g. `{"value": {"advertis
 | Construction & plant erection (17) | Site consultation with admin fee bands per trade, paid before the visit, refunded on technician no-show (disputed if they say they came), released once the BOQ is delivered or 48h after the visit. BOQ builder plus Excel/CSV/Word/PDF import with per-line flags and a mandatory review step. Line-level negotiation, rejection, and milestone payments funded one at a time with commission per milestone. Admin parse-error queue, consultation and milestone dispute resolution, and construction analytics |
 | Supplies marketplace (13) | Storefronts for verified sellers, products with bulk tiers and technician-only discounts, one-seller carts, delivery or pickup, escrowed payment released on receipt (or auto after 3 days), seller reviews, seller payouts via wallet withdrawals, and a seller mode in the app. Admin greenlight check against traction milestones before the feature can be switched on |
 
-**Not built yet:** the admin web panel UI. Every admin function (sections 12–19) exists as an API under `/admin/*`, but there's no web front end for it.
+### Admin web panel
+
+Served by the API at **`/admin-panel`** (e.g. `http://localhost:4000/admin-panel/`). It's plain HTML/CSS/ES modules in `admin-panel/`, with no build step and no dependencies.
+
+| Area | What admins do there |
+|---|---|
+| Overview | Every review queue with its count (urgent ones first), escrow held, 30-day GMV and revenue, feature on/off state |
+| Approvals | Technician verification, certifications and portfolio photos; markup cap exceptions (Demand Notices) with evidence; escalated price challenges and unlisted-seller evidence (Fast Track first); ad campaigns; Supplies listings; reported content; restriction appeals with strike history; ambiguous-stall fault reviews; labor-rate anomalies |
+| Disputes | Job line-item, construction milestone, site-visit no-show and Supplies order disputes. Each opens a case file (quote/BOQ, milestones, payments, chat log, audit trail) with the matching resolution form |
+| BOQ reviews | Uploaded BOQs the parser flagged or couldn't read, with the per-line flags; open the job or mark reviewed |
+| Storefronts & launches | Supplies greenlight progress against the traction milestones, launch (or launch-anyway with an audited reason), feature switches, storefront go-live and suspension, seller login creation |
+| Analytics | 7/30/90-day KPIs, revenue by source, GMV by channel, jobs by category, pricing/quality signals, wallet and withdrawals, ads, the construction funnel and milestones, Supplies, and wallet-bonus and instant-withdrawal economics. Every chart has a table view |
+
+**Sign-in.** With `AUTH_MODE=dev` the panel asks for a user id; use the seeded admin `00000000-0000-0000-0000-000000000001`. In production it uses Firebase phone sign-in, the same identity as the app, and only accounts with the `admin` role get in. For that:
+
+- set `FIREBASE_WEB_API_KEY` and `FIREBASE_AUTH_DOMAIN` (from the Firebase console's web app config);
+- enable the Phone provider;
+- add your panel's domain under Authentication → Settings → Authorized domains.
 
 ## Run it locally
 

@@ -17,6 +17,9 @@ export const env = {
   FIREBASE_PROJECT_ID: opt('FIREBASE_PROJECT_ID'),
   FIREBASE_CLIENT_EMAIL: opt('FIREBASE_CLIENT_EMAIL'),
   FIREBASE_PRIVATE_KEY: opt('FIREBASE_PRIVATE_KEY')?.replace(/\\n/g, '\n'),
+  // Public web config for the admin panel's Firebase sign-in (safe to expose to browsers).
+  FIREBASE_WEB_API_KEY: opt('FIREBASE_WEB_API_KEY'),
+  FIREBASE_AUTH_DOMAIN: opt('FIREBASE_AUTH_DOMAIN'),
 
   PAYSTACK_SECRET_KEY: opt('PAYSTACK_SECRET_KEY'),
   FLUTTERWAVE_SECRET_KEY: opt('FLUTTERWAVE_SECRET_KEY'),

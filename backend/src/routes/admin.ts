@@ -372,11 +372,28 @@ admin.post('/strikes/:id/void', async (req, res) => {
 });
 
 // ---------------------------------------------------------------- disputes (line-item level)
+/**
+ * Open disputes with what an admin needs to decide: the type (standard job / milestone / site visit),
+ * the money at stake, both parties, and who raised it. Each type resolves through its own endpoint.
+ */
 admin.get('/disputes', async (_req, res) => {
   res.json(
     await query(
-      `SELECT d.*, j.short_code, qi.description AS line_description, qi.line_total_minor
-         FROM disputes d JOIN jobs j ON j.id = d.job_id LEFT JOIN quote_items qi ON qi.id = d.quote_item_id
+      `SELECT d.*, j.short_code, j.kind, j.status AS job_status,
+              CASE WHEN d.milestone_id IS NOT NULL THEN 'milestone'
+                   WHEN j.kind = 'construction' THEN 'consultation'
+                   ELSE 'job' END AS dispute_type,
+              qi.description AS line_description, qi.line_total_minor,
+              m.title AS milestone_title, m.position AS milestone_position, m.total_minor AS milestone_total_minor,
+              sc.fee_minor AS consultation_fee_minor, sc.visit_at, sc.visited_at, sc.no_show_reported_at,
+              (SELECT amount_minor FROM payments p WHERE p.job_id = j.id AND p.status = 'held'
+                 AND (d.milestone_id IS NULL OR p.milestone_id = d.milestone_id) ORDER BY p.created_at DESC LIMIT 1) AS held_minor,
+              cu.full_name AS customer_name, tu.full_name AS technician_name, ru.full_name AS raised_by_name, ru.role AS raised_by_role
+         FROM disputes d JOIN jobs j ON j.id = d.job_id
+         LEFT JOIN quote_items qi ON qi.id = d.quote_item_id
+         LEFT JOIN milestones m ON m.id = d.milestone_id
+         LEFT JOIN site_consultations sc ON sc.job_id = j.id
+         JOIN users cu ON cu.id = j.customer_id JOIN users tu ON tu.id = j.technician_id JOIN users ru ON ru.id = d.raised_by
         WHERE d.status = 'open' ORDER BY d.created_at`,
     ),
   );
@@ -511,7 +528,22 @@ admin.post('/wallets/:userId/adjust', async (req, res) => {
 });
 
 // ---------------------------------------------------------------- moderation reports
-admin.get('/reports', async (_req, res) => res.json(await query(`SELECT * FROM content_reports WHERE status = 'open' ORDER BY created_at`)));
+/** Reported content with a preview of what was reported, so it can be judged in place. */
+admin.get('/reports', async (_req, res) =>
+  res.json(
+    await query(
+      `SELECT r.*, u.full_name AS reporter_name,
+              CASE r.target_type
+                WHEN 'review' THEN (SELECT review_text FROM technician_ratings WHERE id = r.target_id)
+                WHEN 'chat_message' THEN (SELECT body FROM chat_messages WHERE id = r.target_id)
+                WHEN 'user' THEN (SELECT full_name FROM users WHERE id = r.target_id)
+                WHEN 'ad' THEN (SELECT name FROM ad_campaigns WHERE id = r.target_id)
+              END AS preview_text,
+              CASE WHEN r.target_type = 'portfolio_image' THEN (SELECT url FROM portfolio_images WHERE id = r.target_id) END AS preview_url
+         FROM content_reports r JOIN users u ON u.id = r.reporter_id
+        WHERE r.status = 'open' ORDER BY r.created_at`,
+    ),
+  ));
 admin.post('/reports/:id', async (req, res) => {
   const b = parse(z.object({ status: z.enum(['actioned', 'dismissed']) }), req.body);
   await query('UPDATE content_reports SET status = $2 WHERE id = $1', [req.params.id, b.status]);
@@ -691,10 +723,23 @@ admin.get('/analytics', async (req, res) => {
   res.json({ days: q.days, gmvByChannel, revenue, categoryDemand, rates, wallet, withdrawals, traction, ads: { ...ads, ctrPct: clickThroughRate(ads.impressions, ads.clicks) } });
 });
 
+/** Full job context for decisions: parties, quotes, BOQ & milestones, payments, chat log and audit trail. */
 admin.get('/jobs/:id', async (req, res) => {
   const job = await getJob(parse(uuid, req.params.id));
-  const events = await query('SELECT * FROM job_events WHERE job_id = $1 ORDER BY created_at', [job.id]);
-  res.json({ job, events });
+  const [events, messages, quotes, payments, consultation, boqs, milestones, parties] = await Promise.all([
+    query(`SELECT e.*, u.full_name AS actor_name FROM job_events e LEFT JOIN users u ON u.id = e.actor_id WHERE e.job_id = $1 ORDER BY e.created_at`, [job.id]),
+    query(`SELECT m.id, m.body, m.channel, m.redacted, m.created_at, u.full_name AS sender_name, u.role AS sender_role
+             FROM chat_messages m LEFT JOIN users u ON u.id = m.sender_id WHERE m.job_id = $1 ORDER BY m.created_at`, [job.id]),
+    query(`SELECT q.*, (SELECT json_agg(i.* ORDER BY i.position) FROM quote_items i WHERE i.quote_id = q.id) AS items
+             FROM quotes q WHERE q.job_id = $1 ORDER BY q.version DESC`, [job.id]),
+    query(`SELECT id, purpose, channel, provider, amount_minor, status, milestone_id, created_at, held_at, captured_at FROM payments WHERE job_id = $1 ORDER BY created_at`, [job.id]),
+    one('SELECT * FROM site_consultations WHERE job_id = $1', [job.id]),
+    query(`SELECT id, version, source, status, parse_status, grand_total_minor, submitted_at FROM boqs WHERE job_id = $1 ORDER BY version DESC`, [job.id]),
+    query(`SELECT * FROM milestones WHERE job_id = $1 AND status <> 'cancelled' ORDER BY position`, [job.id]),
+    one(`SELECT cu.full_name AS customer_name, cu.phone_e164 AS customer_phone, tu.full_name AS technician_name, tu.phone_e164 AS technician_phone, c.name AS category
+           FROM jobs j JOIN users cu ON cu.id = j.customer_id JOIN users tu ON tu.id = j.technician_id JOIN service_categories c ON c.id = j.category_id WHERE j.id = $1`, [job.id]),
+  ]);
+  res.json({ job: { ...job, ...parties }, events, messages, quotes, payments, consultation, boqs, milestones });
 });
 
 admin.post('/jobs/:id/force-status', async (req, res) => {
@@ -934,6 +979,61 @@ admin.get('/supplies/analytics', async (req, res) => {
               count(*) FILTER (WHERE job_id IS NOT NULL)::int AS orders_linked_to_jobs
          FROM supply_orders WHERE created_at > now() - make_interval(days => $1)`,
       [q.days],
+    ),
+  );
+});
+
+// ================================================================ admin panel support
+
+/** Counts for every review queue — powers the panel's sidebar badges and overview. */
+admin.get('/overview', async (_req, res) => {
+  const s = await getSettings();
+  const c = await one<any>(
+    `SELECT
+       (SELECT count(*) FROM technician_profiles WHERE verification_status = 'pending')::int AS technicians,
+       (SELECT count(*) FROM certifications WHERE status = 'pending')::int AS certifications,
+       (SELECT count(*) FROM portfolio_images WHERE moderation_status = 'pending')::int AS portfolio,
+       (SELECT count(*) FROM markup_exceptions WHERE status = 'pending')::int AS cap_exceptions,
+       (SELECT count(*) FROM price_challenges WHERE status IN ('escalated', 'pending_evidence_review'))::int AS price_challenges,
+       (SELECT count(*) FROM price_challenges WHERE status IN ('escalated', 'pending_evidence_review') AND is_fast_track)::int AS fast_track,
+       (SELECT count(*) FROM ad_campaigns WHERE status = 'pending_review')::int AS ads,
+       (SELECT count(*) FROM supply_products WHERE moderation_status = 'pending')::int AS products,
+       (SELECT count(*) FROM content_reports WHERE status = 'open')::int AS reports,
+       (SELECT count(*) FROM appeals WHERE status = 'pending')::int AS appeals,
+       (SELECT count(*) FROM fault_reviews WHERE status = 'pending')::int AS fault_reviews,
+       (SELECT count(*) FROM multiplier_history WHERE review_status = 'pending')::int AS multiplier_anomalies,
+       (SELECT count(*) FROM disputes WHERE status = 'open')::int AS disputes,
+       (SELECT count(*) FROM supply_orders WHERE status = 'disputed')::int AS supply_disputes,
+       (SELECT count(*) FROM boqs WHERE status = 'draft' AND parse_status IN ('needs_review', 'failed'))::int AS boq_reviews,
+       (SELECT count(*) FROM parts_sellers WHERE storefront_status = 'pending')::int AS storefronts,
+       (SELECT count(*) FROM jobs WHERE status NOT IN ('completed', 'cancelled', 'declined', 'incomplete'))::int AS open_jobs,
+       (SELECT COALESCE(sum(amount_minor), 0) FROM payments WHERE status = 'held')::bigint AS escrow_minor`,
+  );
+  res.json({ ...c, features: s.features });
+});
+
+admin.get('/advertisers', async (_req, res) => {
+  res.json(
+    await query(
+      `SELECT u.id, u.full_name, u.email, u.phone_e164, u.firebase_uid IS NOT NULL AS signed_in, ap.company_name, ap.seller_id,
+              ps.name AS seller_name, ps.storefront_status
+         FROM users u LEFT JOIN advertiser_profiles ap ON ap.user_id = u.id LEFT JOIN parts_sellers ps ON ps.owner_user_id = u.id
+        WHERE u.role = 'advertiser' AND u.deleted_at IS NULL ORDER BY u.created_at DESC`,
+    ),
+  );
+});
+
+/** Technician ratings for moderation (reported or newest first). */
+admin.get('/reviews', async (req, res) => {
+  const q = parse(z.object({ status: z.enum(['approved', 'rejected', 'pending']).default('approved') }), req.query);
+  res.json(
+    await query(
+      `SELECT r.*, cu.full_name AS customer_name, tu.full_name AS technician_name, c.name AS category,
+              (SELECT count(*)::int FROM content_reports cr WHERE cr.target_id = r.id AND cr.status = 'open') AS open_reports
+         FROM technician_ratings r JOIN users cu ON cu.id = r.customer_id JOIN users tu ON tu.id = r.technician_id
+         JOIN service_categories c ON c.id = r.category_id
+        WHERE r.moderation_status = $1 ORDER BY open_reports DESC, r.created_at DESC LIMIT 200`,
+      [q.status],
     ),
   );
 });
