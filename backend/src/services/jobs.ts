@@ -40,6 +40,18 @@ const TRANSITIONS: Record<string, string[]> = {
   disputed: ['completed', 'cancelled', 'in_progress'],
 };
 
+/** Construction & plant erection (Section 17): consultation → BOQ → milestones. */
+const CONSTRUCTION_TRANSITIONS: Record<string, string[]> = {
+  requested: ['accepted', 'declined', 'cancelled', 'incomplete'], // consultation requested → fee quoted
+  accepted: ['funded', 'cancelled', 'incomplete'], //                fee quoted → fee paid
+  funded: ['quoted', 'cancelled', 'disputed', 'incomplete'], //       visit → BOQ submitted
+  quoted: ['negotiating', 'approved', 'cancelled', 'incomplete'], //  BOQ under customer review
+  negotiating: ['quoted', 'cancelled', 'incomplete'], //              revision requested
+  approved: ['in_progress', 'cancelled', 'incomplete'], //            BOQ + milestones agreed
+  in_progress: ['completed', 'disputed', 'incomplete'], //            milestones running
+  disputed: ['in_progress', 'completed', 'cancelled', 'funded'],
+};
+
 export async function getJob(id: string, db?: Db, forUpdate = false): Promise<JobRow> {
   const job = await one<JobRow>(`SELECT * FROM jobs WHERE id = $1 ${forUpdate ? 'FOR UPDATE' : ''}`, [id], db);
   if (!job) throw notFound('Job');
@@ -49,6 +61,13 @@ export async function getJob(id: string, db?: Db, forUpdate = false): Promise<Jo
 export function assertParticipant(job: JobRow, userId: string, role: string) {
   if (role === 'admin') return;
   if (job.customer_id !== userId && job.technician_id !== userId) throw notFound('Job');
+}
+
+/** Standard-job endpoints refuse construction projects, which have their own flow (Section 17). */
+export function assertStandard(job: JobRow) {
+  if (job.kind === 'construction') {
+    throw conflict('USE_CONSTRUCTION_FLOW', 'This is a construction project — use the site consultation, BOQ and milestone steps');
+  }
 }
 
 export function assertCustomer(job: JobRow, userId: string) {
@@ -79,7 +98,7 @@ export async function transition(
   actorId: string | null,
   opts: { actionFrom?: Party; actionReason?: string; event?: object } = {},
 ) {
-  const allowed = TRANSITIONS[job.status] ?? [];
+  const allowed = (job.kind === 'construction' ? CONSTRUCTION_TRANSITIONS : TRANSITIONS)[job.status] ?? [];
   if (!allowed.includes(to)) {
     throw conflict('INVALID_TRANSITION', `Cannot move a ${job.status} job to ${to}`);
   }

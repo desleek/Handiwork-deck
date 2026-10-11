@@ -10,6 +10,8 @@ import { admin } from './routes/admin.ts';
 import { advertiser } from './routes/advertiser.ts';
 import { catalog } from './routes/catalog.ts';
 import { comms } from './routes/comms.ts';
+import { construction } from './routes/construction.ts';
+import { seller, supplies } from './routes/supplies.ts';
 import { jobs } from './routes/jobs.ts';
 import { me } from './routes/me.ts';
 import { quotes } from './routes/quotes.ts';
@@ -39,10 +41,13 @@ export function createApp() {
   app.use('/jobs', jobs);
   app.use('/jobs/:id', quotes); // quotes, labor-only, price challenges, labor negotiation
   app.use('/jobs/:id', comms); // chat & ratings
+  app.use('/jobs/:id/construction', construction); // Section 17
   app.use('/wallet', wallet);
   app.use('/payments', payments);
   app.use('/admin', admin);
   app.use('/advertiser', advertiser); // ads bolt-on (Section 12)
+  app.use('/supplies', supplies); // Section 13 (behind the supplies feature flag)
+  app.use('/seller', seller); //     storefront management for sellers
 
   app.use((_req: Request, res: Response) => res.status(404).json({ error: { code: 'NOT_FOUND', message: 'Route not found' } }));
   app.use(errorHandler);

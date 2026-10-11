@@ -96,7 +96,7 @@ me.get('/notifications', requireUser(), async (req, res) => {
 me.post('/uploads', requireUser(), async (req, res) => {
   const b = parse(
     z.object({
-      kind: z.enum(['portfolio', 'receipt', 'evidence', 'id_document', 'certification', 'boq', 'avatar']),
+      kind: z.enum(['portfolio', 'receipt', 'evidence', 'id_document', 'certification', 'boq', 'avatar', 'product', 'ad_creative']),
       contentType: z.string(),
       size: z.number().int().positive(),
     }),

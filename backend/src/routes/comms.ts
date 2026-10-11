@@ -59,7 +59,7 @@ comms.post('/rating', requireUser('customer'), async (req, res) => {
     const job = await getJob(parse(uuid, req.params.id), db, true);
     assertCustomer(job, req.user!.id);
     if (job.status !== 'completed') throw conflict('NOT_COMPLETED', 'You can rate a job once it is completed');
-    const paid = await one(`SELECT 1 FROM payments WHERE job_id = $1 AND purpose = 'job' AND status = 'captured'`, [job.id], db);
+    const paid = await one(`SELECT 1 FROM payments WHERE job_id = $1 AND purpose IN ('job', 'milestone') AND status = 'captured'`, [job.id], db);
     if (!paid) throw conflict('NOT_PLATFORM_PAID', 'Only jobs paid through Handiwork-Deck can be reviewed');
     const overall = overallScore(b, TECHNICIAN_RATING_FIELDS);
     const r = await one(

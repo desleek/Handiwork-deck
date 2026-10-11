@@ -11,6 +11,8 @@ export type LedgerType =
   | 'withdrawal_fee'
   | 'withdrawal_reversal'
   | 'boost_purchase'
+  | 'supplies_purchase'
+  | 'supplies_sale'
   | 'adjustment';
 
 /**

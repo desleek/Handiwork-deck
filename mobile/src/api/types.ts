@@ -66,6 +66,7 @@ export type JobStatus =
 export interface JobDetail {
   id: string;
   short_code: string;
+  kind: 'standard' | 'construction';
   status: JobStatus;
   booking_type: 'instant' | 'request';
   is_fast_track: boolean;

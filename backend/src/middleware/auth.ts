@@ -56,7 +56,20 @@ export async function authenticate(req: Request, _res: Response, next: NextFunct
       WHERE ${devUserId ? 'id::text = $1' : 'firebase_uid = $1'} AND deleted_at IS NULL`,
     [devUserId ?? decoded.uid],
   );
-  if (user) req.user = { ...user, firebaseUid: user.firebase_uid };
+  if (user) {
+    req.user = { ...user, firebaseUid: user.firebase_uid };
+  } else if (env.AUTH_MODE !== 'dev' && decoded.phone_number) {
+    // Admin-provisioned accounts (advertisers / sellers, admins) are claimed on first sign-in
+    // by the person who verified that phone number with Firebase.
+    const claimed = await one<any>(
+      `UPDATE users SET firebase_uid = $1, updated_at = now()
+        WHERE id = (SELECT id FROM users WHERE phone_e164 = $2 AND firebase_uid IS NULL AND role IN ('advertiser', 'admin')
+                     AND deleted_at IS NULL ORDER BY created_at LIMIT 1)
+        RETURNING id, firebase_uid, role, status, full_name, email, phone_e164`,
+      [decoded.uid, decoded.phone_number],
+    );
+    if (claimed) req.user = { ...claimed, firebaseUid: claimed.firebase_uid };
+  }
   next();
 }
 

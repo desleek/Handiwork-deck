@@ -104,9 +104,21 @@ export interface PlatformSettings {
   adMaxCampaignDays: number;
 
   // Section 17 — construction
+  /** Keyed by category slug (e.g. "c-roofing"); categories without a band use the default band. */
   consultancyFeeBands: Record<string, { minMinor: number; maxMinor: number }>;
+  consultancyDefaultBand: { minMinor: number; maxMinor: number };
   consultancyRefundOnNoShow: boolean;
   consultancyCommissionBps: number;
+  /** Hours after the agreed visit time before a customer can report a technician no-show. */
+  consultancyNoShowGraceHours: number;
+  maxMilestones: number;
+
+  // Section 13 — supplies marketplace
+  suppliesCommissionBps: number;
+  /** Days after delivery/pickup before an unconfirmed order auto-completes and pays the seller. */
+  suppliesAutoConfirmDays: number;
+  /** Admin-defined traction milestones that greenlight the Supplies marketplace. */
+  suppliesGreenlight: { minMonthlyActiveCustomers: number; minCompletedJobs30d: number; minVerifiedSellers: number };
 
   // Section 18 — incomplete transactions
   incompleteTimeoutDays: number;
@@ -208,8 +220,15 @@ export const DEFAULT_SETTINGS: PlatformSettings = {
   adMaxCampaignDays: 90,
 
   consultancyFeeBands: {},
+  consultancyDefaultBand: { minMinor: 5_000 * NAIRA, maxMinor: 150_000 * NAIRA },
   consultancyRefundOnNoShow: true,
   consultancyCommissionBps: 0,
+  consultancyNoShowGraceHours: 3,
+  maxMilestones: 12,
+
+  suppliesCommissionBps: 500,
+  suppliesAutoConfirmDays: 3,
+  suppliesGreenlight: { minMonthlyActiveCustomers: 2_000, minCompletedJobs30d: 1_000, minVerifiedSellers: 25 },
 
   incompleteTimeoutDays: 14,
   strikeWindowDays: 182,

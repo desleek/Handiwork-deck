@@ -147,6 +147,9 @@ const IOS_MAP: Record<string, ComponentProps<typeof Ionicons>['name']> = {
   'clipboard-text-outline': 'clipboard-outline',
   'chart-line': 'trending-up',
   'storefront-outline': 'storefront-outline',
+  'cart-outline': 'cart-outline',
+  'package-variant': 'cube-outline',
+  'bullhorn-outline': 'megaphone-outline',
 };
 
 export function PlatformIcon({ name, size = 22, color }: { name: string; size?: number; color?: string }) {

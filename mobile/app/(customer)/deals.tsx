@@ -1,5 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Image } from 'expo-image';
+import { router } from 'expo-router';
 import * as WebBrowser from 'expo-web-browser';
 import { useEffect, useState } from 'react';
 import { trackClick, trackImpression } from '../../src/lib/adTracking';
@@ -40,6 +41,7 @@ export default function Deals() {
   const [tab, setTab] = useState<'deals' | 'supplies'>('deals');
   const deals = useQuery({ queryKey: ['deals'], queryFn: () => api('/deals') });
   const join = useMutation({ mutationFn: () => api('/me/supplies-waitlist', { body: {} }) });
+  const suppliesStatus = useQuery({ queryKey: ['supplies-status'], queryFn: () => api('/supplies/status') });
 
   return (
     <Screen>
@@ -52,12 +54,21 @@ export default function Deals() {
       </Row>
 
       {tab === 'supplies' ? (
+        suppliesStatus.data?.enabled ? (
+          <Card>
+            <T v="heading">Supplies marketplace</T>
+            <T muted>Buy parts, tools and materials from verified sellers, with delivery or pickup. Payment is held until you receive your order.</T>
+            <Button title="Browse supplies" onPress={() => router.push('/supplies')} />
+            <Button title="My orders" kind="secondary" onPress={() => router.push('/supplies/orders')} />
+          </Card>
+        ) : (
         <Card>
           <Tag label="Coming soon" tone="warning" />
           <T v="heading">Buy parts and materials in the app</T>
           <T muted>Order from verified sellers with delivery or pickup. Join the waitlist and we'll tell you when it opens.</T>
           <Button title={join.isSuccess ? "You're on the list ✓" : 'Join the waitlist'} disabled={join.isSuccess} loading={join.isPending} onPress={() => join.mutate()} />
         </Card>
+        )
       ) : !deals.data?.enabled ? (
         <Empty title="Deals are coming" body="Offers from verified spare-parts sellers and brands will appear here." />
       ) : (

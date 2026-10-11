@@ -6,6 +6,7 @@ import { authenticate, requireUser } from '../middleware/auth.ts';
 import {
   assertCustomer,
   assertParticipant,
+  assertStandard,
   assertTechnician,
   getJob,
   logJobEvent,
@@ -67,6 +68,9 @@ jobs.post('/', requireUser('customer'), async (req, res) => {
   if (offer.supercategory === 'construction' && !s.features.construction) {
     throw conflict('CONSTRUCTION_NOT_LIVE', 'Construction services are coming soon');
   }
+  // Construction always starts with a paid site consultation (Section 17, Step 1) — never instant.
+  const isConstruction = offer.supercategory === 'construction';
+  if (isConstruction) b.bookingType = 'request';
 
   const job = await tx(async (db) => {
     const j = await one(
@@ -87,7 +91,7 @@ jobs.post('/', requireUser('customer'), async (req, res) => {
         b.scheduledFor ?? null,
         b.fastTrack,
         s.currency,
-        b.bookingType === 'instant' ? 'Submit a quote' : 'Accept or decline the booking',
+        isConstruction ? 'Quote a site consultation fee' : b.bookingType === 'instant' ? 'Submit a quote' : 'Accept or decline the booking',
       ],
       db,
     );
@@ -108,7 +112,7 @@ jobs.post('/', requireUser('customer'), async (req, res) => {
   await notify({
     userId: b.technicianId,
     type: 'job.new',
-    title: b.bookingType === 'instant' ? `New instant booking #${job.short_code}` : `New job request #${job.short_code}`,
+    title: isConstruction ? `Site visit request #${job.short_code}` : b.bookingType === 'instant' ? `New instant booking #${job.short_code}` : `New job request #${job.short_code}`,
     body: b.description.slice(0, 120),
     data: { jobId: job.id },
     urgent: b.fastTrack,
@@ -225,6 +229,7 @@ jobs.post('/:id/accept', requireUser('technician'), async (req, res) => {
   const job = await tx(async (db) => {
     const j = await getJob(parse(id, req.params.id), db, true);
     assertTechnician(j, req.user!.id);
+    assertStandard(j);
     await transition(db, j, 'accepted', req.user!.id);
     return j;
   });
@@ -252,6 +257,7 @@ jobs.post('/:id/approve', requireUser('customer'), async (req, res) => {
   const job = await tx(async (db) => {
     const j = await getJob(parse(id, req.params.id), db, true);
     assertCustomer(j, req.user!.id);
+    assertStandard(j);
     const q = await liveQuote(db, j.id);
     if (q.status !== 'submitted') throw conflict('QUOTE_NOT_READY', q.status === 'pending_exception' ? 'This quote is still under review' : 'No quote to approve');
     const open = await one(
@@ -275,6 +281,7 @@ jobs.post('/:id/pay', requireUser('customer'), async (req, res) => {
   const b = parse(z.object({ channel: z.enum(['card', 'bank_transfer', 'ussd', 'wallet']) }), req.body);
   const job = await getJob(parse(id, req.params.id));
   assertCustomer(job, req.user!.id);
+  assertStandard(job);
   if (job.status !== 'approved') throw conflict('NOT_PAYABLE', 'Approve a quote before paying');
   const q = await liveQuote(pool, job.id);
   const existing = await one<any>(`SELECT id, checkout, channel FROM payments WHERE job_id = $1 AND purpose = 'job' AND status = 'initiated' AND quote_id = $2 AND channel = $3`, [job.id, q.id, b.channel]);
@@ -296,6 +303,7 @@ jobs.post('/:id/en-route', requireUser('technician'), async (req, res) => {
   const job = await tx(async (db) => {
     const j = await getJob(parse(id, req.params.id), db, true);
     assertTechnician(j, req.user!.id);
+    assertStandard(j);
     await transition(db, j, 'en_route', req.user!.id);
     return j;
   });
@@ -307,6 +315,7 @@ jobs.post('/:id/start', requireUser('technician'), async (req, res) => {
   await tx(async (db) => {
     const j = await getJob(parse(id, req.params.id), db, true);
     assertTechnician(j, req.user!.id);
+    assertStandard(j);
     await transition(db, j, 'in_progress', req.user!.id);
   });
   res.json({ ok: true });
@@ -316,6 +325,7 @@ jobs.post('/:id/complete', requireUser('technician'), async (req, res) => {
   const job = await tx(async (db) => {
     const j = await getJob(parse(id, req.params.id), db, true);
     assertTechnician(j, req.user!.id);
+    assertStandard(j);
     await transition(db, j, 'awaiting_confirmation', req.user!.id);
     return j;
   });
@@ -328,6 +338,7 @@ jobs.post('/:id/confirm', requireUser('customer'), async (req, res) => {
   const job = await tx(async (db) => {
     const j = await getJob(parse(id, req.params.id), db, true);
     assertCustomer(j, req.user!.id);
+    assertStandard(j);
     if (j.status !== 'awaiting_confirmation') throw conflict('NOT_READY', 'The technician has not marked this job complete');
     await captureJobPayment(db, j.id, req.user!.id);
     await transition(db, j, 'completed', req.user!.id);
@@ -344,6 +355,7 @@ jobs.post('/:id/reject-completion', requireUser('customer'), async (req, res) =>
   const job = await tx(async (db) => {
     const j = await getJob(parse(id, req.params.id), db, true);
     assertCustomer(j, req.user!.id);
+    assertStandard(j);
     if (b.dispute) {
       await query('INSERT INTO disputes (job_id, quote_item_id, raised_by, reason) VALUES ($1,$2,$3,$4)', [j.id, b.quoteItemId ?? null, req.user!.id, b.reason], db);
       await transition(db, j, 'disputed', req.user!.id, { event: { reason: b.reason } });
@@ -367,6 +379,21 @@ jobs.post('/:id/cancel', async (req, res) => {
     }
     const held = await one<any>(`SELECT id, amount_minor FROM payments WHERE job_id = $1 AND purpose = 'job' AND status = 'held'`, [j.id], db);
     if (held) await refundPayment(db, held.id, held.amount_minor, `Refund: job #${j.short_code} cancelled`);
+    if (j.kind === 'construction') {
+      // Consultancy fee: refunded if the visit hasn't happened, earned by the technician once it has (Section 17).
+      const { consultationFor, heldPayment, releaseConsultancy } = await import('../services/construction.ts');
+      const c = await consultationFor(db, j.id);
+      if (c?.status === 'paid') {
+        const p = await heldPayment(db, { purpose: 'consultancy', jobId: j.id });
+        if (p) await refundPayment(db, p.id, p.amount_minor, `Refund: site visit cancelled, job #${j.short_code}`);
+        await query(`UPDATE site_consultations SET status = 'cancelled', refunded_minor = $2 WHERE id = $1`, [c.id, p?.amount_minor ?? 0], db);
+      } else if (c?.status === 'visited') {
+        await releaseConsultancy(db, c.id, await getSettings(), req.user!.id);
+      }
+      const funded = await one(`SELECT 1 FROM milestones WHERE job_id = $1 AND status IN ('funded', 'awaiting_confirmation', 'disputed')`, [j.id], db);
+      if (funded) throw conflict('MILESTONE_FUNDED', 'A milestone is funded — open a dispute instead of cancelling');
+      await query(`UPDATE milestones SET status = 'cancelled' WHERE job_id = $1 AND status IN ('proposed', 'pending')`, [j.id], db);
+    }
     await query('UPDATE jobs SET cancel_reason = $2, cancelled_by = $3 WHERE id = $1', [j.id, b.reason, req.user!.id], db);
     await transition(db, j, 'cancelled', req.user!.id, { event: { reason: b.reason, refunded: !!held } });
     return j;

@@ -1,0 +1,12 @@
+"BILL OF QUANTITIES - 3 BEDROOM BUNGALOW, LEKKI"
+Item,Description,Unit,Qty,Rate (N),Amount (N)
+,SUBSTRUCTURE,,,,
+A,Excavate foundation trench,m3,24,"4,500","108,000"
+B,Concrete 1:2:4 in strip foundation,m3,12,"85,000","1,020,000"
+C,Labour: setting out and blinding,item,1,"60,000","60,000"
+,Sub-total carried to summary,,,,"1,188,000"
+,SUPERSTRUCTURE,,,,
+D,225mm sandcrete blocks,nr,1800,650,"1,170,000"
+E,Bricklayer workmanship to block walls,m2,220,"1,500","330,000"
+F,Y12 reinforcement bars,tonnes,1.5,"1,100,000","1,650,000"
+,GRAND TOTAL,,,,"4,338,000"

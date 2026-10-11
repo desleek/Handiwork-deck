@@ -49,6 +49,7 @@ export async function registerRepeatables() {
   await maintenanceQueue.upsertJobScheduler('incomplete-scan', { pattern: '0 * * * *' }, { name: 'incomplete-scan' });
   await maintenanceQueue.upsertJobScheduler('boost-lifecycle', { every: 60_000 }, { name: 'boost-lifecycle' });
   await maintenanceQueue.upsertJobScheduler('ads-lifecycle', { every: 5 * 60_000 }, { name: 'ads-lifecycle' });
+  await maintenanceQueue.upsertJobScheduler('phase3-lifecycle', { pattern: '15 * * * *' }, { name: 'phase3-lifecycle' });
   await maintenanceQueue.upsertJobScheduler('multiplier-recalc', { pattern: '30 2 * * *' }, { name: 'multiplier-recalc' });
   await maintenanceQueue.upsertJobScheduler('restriction-expiry', { pattern: '*/15 * * * *' }, { name: 'restriction-expiry' });
   await maintenanceQueue.upsertJobScheduler('standard-withdrawals', { pattern: '0 9 * * 1-5' }, { name: 'standard-withdrawals' });

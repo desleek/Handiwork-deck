@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { one, query, tx } from '../db/pool.ts';
+import { one, pool, query, tx } from '../db/pool.ts';
 import { slugify } from '../db/seedCategories.ts';
 import { DEFAULT_SETTINGS, type SettingKey } from '../domain/settings.ts';
 import { SETTING_SCHEMAS } from '../domain/settingsSchema.ts';
@@ -15,7 +15,9 @@ import { refreshTechnicianRating } from '../services/ratings.ts';
 import { averageJobValue, bonusEconomicsReport, unfundedWarnings } from '../services/economics.ts';
 import { campaignStats, markCampaignPaid, refreshCampaignStatuses } from '../services/ads.ts';
 import { clickThroughRate } from '../domain/ads.ts';
+import { conversionRate } from '../domain/construction.ts';
 import { getSettings, updateSetting } from '../services/settings.ts';
+import { greenlight, refreshSellerRating, releaseOrder } from '../services/supplies.ts';
 import { postLedger } from '../services/wallet.ts';
 
 export const admin = Router();
@@ -39,6 +41,13 @@ admin.put('/settings/:key', async (req, res) => {
   const def = DEFAULT_SETTINGS[key];
   if (typeof b.value !== typeof def || Array.isArray(b.value) !== Array.isArray(def)) {
     throw badRequest('TYPE_MISMATCH', `Setting ${key} expects a ${Array.isArray(def) ? 'list' : typeof def}`);
+  }
+  // Section 13: the Supplies marketplace is greenlit by admin-defined traction milestones.
+  if (key === 'features' && (b.value as any)?.supplies && !(await getSettings()).features.supplies) {
+    const g = await greenlight(await getSettings());
+    if (!g.met && !(req.body as any).overrideGreenlight) {
+      throw conflict('GREENLIGHT_NOT_MET', 'Traction milestones for Supplies are not met yet. Pass overrideGreenlight: true with a reason to launch anyway.', g);
+    }
   }
   const schema = SETTING_SCHEMAS[key];
   if (schema) {
@@ -580,6 +589,8 @@ admin.post('/advertisers', async (req, res) => {
     const user = await one(`INSERT INTO users (role, full_name, email, phone_e164) VALUES ('advertiser', $1, $2, $3) RETURNING id, full_name`, [b.companyName, b.contactEmail ?? null, b.contactPhone ?? null], db);
     await query('INSERT INTO wallets (user_id) VALUES ($1)', [user.id], db);
     await query(`INSERT INTO advertiser_profiles (user_id, company_name, contact_email, contact_phone, seller_id) VALUES ($1,$2,$3,$4,$5)`, [user.id, b.companyName, b.contactEmail ?? null, b.contactPhone ?? null, b.sellerId ?? null], db);
+    // A seller in the verified registry gets this login as its storefront owner (Section 13).
+    if (b.sellerId) await query('UPDATE parts_sellers SET owner_user_id = $2 WHERE id = $1 AND owner_user_id IS NULL', [b.sellerId, user.id], db);
     await audit(db, req.user!.id, 'advertiser.create', 'user', user.id, b);
     return user;
   });
@@ -695,4 +706,234 @@ admin.post('/jobs/:id/force-status', async (req, res) => {
     await audit(db, req.user!.id, 'job.force_status', 'job', job.id, b, b.reason);
   });
   res.json({ ok: true });
+});
+
+// ================================================================ Section 17 — construction admin
+
+/** Uploaded BOQs the parser flagged or failed on — admins can help technicians fix them. */
+admin.get('/construction/boq-parse-queue', async (_req, res) => {
+  res.json(
+    await query(
+      `SELECT b.id, b.job_id, j.short_code, b.version, b.source, b.parse_status, b.parse_warnings, b.created_at, u.full_name AS technician_name,
+              (SELECT count(*)::int FROM boq_items i WHERE i.boq_id = b.id) AS lines,
+              (SELECT count(*)::int FROM boq_items i WHERE i.boq_id = b.id AND i.flagged IS NOT NULL) AS flagged_lines,
+              (SELECT json_agg(json_build_object('position', i.position, 'source_row', i.source_row, 'description', i.description, 'flag', i.flagged) ORDER BY i.position)
+                 FROM boq_items i WHERE i.boq_id = b.id AND i.flagged IS NOT NULL) AS flags
+         FROM boqs b JOIN jobs j ON j.id = b.job_id JOIN users u ON u.id = b.technician_id
+        WHERE b.status = 'draft' AND b.parse_status IN ('needs_review', 'failed')
+        ORDER BY b.parse_status = 'failed' DESC, b.created_at`,
+    ),
+  );
+});
+
+admin.post('/construction/boq-parse-queue/:id/dismiss', async (req, res) => {
+  const b = parse(z.object({ note: z.string().max(500).optional() }), req.body ?? {});
+  await query(`UPDATE boqs SET parse_status = 'reviewed', parse_warnings = parse_warnings || $2::jsonb WHERE id = $1 AND status = 'draft'`, [
+    parse(uuid, req.params.id),
+    JSON.stringify([`Reviewed by admin${b.note ? `: ${b.note}` : ''}`]),
+  ]);
+  res.json({ ok: true });
+});
+
+/** Consultation no-show disputes: refund the customer or release the fee to the technician. */
+admin.post('/construction/consultations/:jobId/resolve', async (req, res) => {
+  const b = parse(z.object({ refund: z.boolean(), note: z.string().min(5).max(2000) }), req.body);
+  const s = await getSettings();
+  await tx(async (db) => {
+    const job = await getJob(parse(uuid, req.params.jobId), db, true);
+    const c = await one<any>(`SELECT * FROM site_consultations WHERE job_id = $1 AND status = 'disputed' FOR UPDATE`, [job.id], db);
+    if (!c) throw notFound('Disputed consultation');
+    const { heldPayment, releaseConsultancy } = await import('../services/construction.ts');
+    if (b.refund) {
+      const p = await heldPayment(db, { purpose: 'consultancy', jobId: job.id });
+      if (p) await refundPayment(db, p.id, p.amount_minor, `Refund: consultation dispute, job #${job.short_code}`);
+      await query(`UPDATE site_consultations SET status = 'refunded', refunded_minor = $2 WHERE id = $1`, [c.id, p?.amount_minor ?? 0], db);
+      await transition(db, job, 'cancelled', req.user!.id, { actionFrom: 'none', actionReason: '', event: { adminNote: b.note } });
+    } else {
+      await query(`UPDATE site_consultations SET status = 'visited' WHERE id = $1`, [c.id], db);
+      await releaseConsultancy(db, c.id, s, req.user!.id);
+      await transition(db, job, 'funded', req.user!.id, { actionFrom: 'technician', actionReason: 'Prepare and submit the Bill of Quantities', event: { adminNote: b.note } });
+    }
+    await query(`UPDATE disputes SET status = $2, resolution = $3, resolved_by = $4, resolved_at = now() WHERE job_id = $1 AND status = 'open' AND milestone_id IS NULL`, [
+      job.id, b.refund ? 'resolved_customer' : 'resolved_technician', b.note, req.user!.id,
+    ], db);
+    await audit(db, req.user!.id, 'construction.consultation_resolve', 'job', job.id, b, b.note);
+  });
+  res.json({ ok: true });
+});
+
+/** Milestone disputes: release, partial refund then release, or full refund (optionally ending the project). */
+admin.post('/construction/milestones/:id/resolve', async (req, res) => {
+  const b = parse(
+    z.object({
+      outcome: z.enum(['release', 'partial', 'refund']),
+      refundMinor: z.number().int().positive().optional(),
+      endProject: z.boolean().default(false),
+      note: z.string().min(5).max(2000),
+    }).refine((v) => v.outcome !== 'partial' || v.refundMinor, 'refundMinor is required for a partial refund'),
+    req.body,
+  );
+  await tx(async (db) => {
+    const m = await one<any>(`SELECT * FROM milestones WHERE id = $1 AND status = 'disputed' FOR UPDATE`, [parse(uuid, req.params.id)], db);
+    if (!m) throw notFound('Disputed milestone');
+    const { heldPayment, releaseMilestone } = await import('../services/construction.ts');
+    if (b.outcome === 'refund') {
+      const p = await heldPayment(db, { purpose: 'milestone', milestoneId: m.id });
+      if (p) await refundPayment(db, p.id, p.amount_minor, `Refund: milestone ${m.position} dispute`);
+      await query(`UPDATE milestones SET status = 'refunded' WHERE id = $1`, [m.id], db);
+      const job = await getJob(m.job_id, db, true);
+      if (b.endProject) {
+        await query(`UPDATE milestones SET status = 'cancelled' WHERE boq_id = $1 AND status = 'pending'`, [m.boq_id], db);
+        await transition(db, job, 'cancelled', req.user!.id, { actionFrom: 'none', actionReason: '', event: { adminNote: b.note } });
+      } else {
+        const next = await one<any>(`SELECT position, title, status FROM milestones WHERE boq_id = $1 AND status IN ('pending', 'funded', 'awaiting_confirmation') ORDER BY position LIMIT 1`, [m.boq_id], db);
+        if (next) await transition(db, job, 'in_progress', req.user!.id, { actionFrom: next.status === 'pending' ? 'customer' : 'technician', actionReason: `${next.status === 'pending' ? 'Fund' : 'Complete'} milestone ${next.position}: ${next.title}` });
+        else {
+          await transition(db, job, 'in_progress', req.user!.id, { actionFrom: 'none', actionReason: '' });
+          await transition(db, job, 'completed', req.user!.id, { actionFrom: 'none', actionReason: '' });
+        }
+      }
+    } else {
+      await releaseMilestone(db, m.id, req.user!.id, { refundMinor: b.outcome === 'partial' ? b.refundMinor : 0 });
+    }
+    await query(`UPDATE disputes SET status = $2, resolution = $3, refund_minor = $4, resolved_by = $5, resolved_at = now() WHERE milestone_id = $1 AND status = 'open'`, [
+      m.id, b.outcome === 'release' ? 'resolved_technician' : b.outcome === 'refund' ? 'resolved_customer' : 'split', b.note, b.refundMinor ?? null, req.user!.id,
+    ], db);
+    await audit(db, req.user!.id, `construction.milestone_${b.outcome}`, 'milestone', m.id, b, b.note);
+  });
+  res.json({ ok: true });
+});
+
+/** Construction-vertical analytics: average project value, consultancy-to-conversion, milestone completion. */
+admin.get('/construction/analytics', async (req, res) => {
+  const q = parse(z.object({ days: z.coerce.number().int().min(1).max(730).default(90) }), req.query);
+  const r = await one<any>(
+    `SELECT
+       (SELECT count(*) FROM site_consultations WHERE created_at > now() - make_interval(days => $1))::int AS consultations_quoted,
+       (SELECT count(*) FROM site_consultations WHERE status IN ('paid', 'visited') AND created_at > now() - make_interval(days => $1))::int AS consultations_paid,
+       (SELECT count(*) FROM site_consultations WHERE visited_at IS NOT NULL AND created_at > now() - make_interval(days => $1))::int AS consultations_visited,
+       (SELECT COALESCE(sum(fee_minor) FILTER (WHERE visited_at IS NOT NULL), 0) FROM site_consultations WHERE created_at > now() - make_interval(days => $1))::bigint AS consultancy_fees_minor,
+       (SELECT count(DISTINCT job_id) FROM boqs WHERE status = 'approved' AND decided_at > now() - make_interval(days => $1))::int AS projects_approved,
+       (SELECT round(avg(grand_total_minor)) FROM boqs WHERE status = 'approved' AND decided_at > now() - make_interval(days => $1))::bigint AS avg_project_value_minor,
+       (SELECT count(*) FROM milestones m JOIN boqs b ON b.id = m.boq_id WHERE b.status = 'approved' AND b.decided_at > now() - make_interval(days => $1))::int AS milestones_agreed,
+       (SELECT count(*) FROM milestones m JOIN boqs b ON b.id = m.boq_id WHERE m.status = 'released' AND b.decided_at > now() - make_interval(days => $1))::int AS milestones_released,
+       (SELECT count(*) FROM milestones m JOIN boqs b ON b.id = m.boq_id WHERE m.status IN ('disputed', 'refunded') AND b.decided_at > now() - make_interval(days => $1))::int AS milestones_disputed,
+       (SELECT count(*) FROM boqs WHERE source <> 'builder' AND created_at > now() - make_interval(days => $1))::int AS uploads,
+       (SELECT count(*) FROM boqs WHERE parse_status = 'failed' AND created_at > now() - make_interval(days => $1))::int AS upload_failures`,
+    [q.days],
+  );
+  res.json({
+    days: q.days,
+    ...r,
+    consultancyToConversionPct: conversionRate(r.consultations_visited, r.projects_approved),
+    milestoneCompletionPct: r.milestones_agreed ? Math.round((r.milestones_released / r.milestones_agreed) * 1000) / 10 : null,
+  });
+});
+
+// ================================================================ Section 13 — Supplies admin
+
+admin.get('/supplies/greenlight', async (_req, res) => {
+  const s = await getSettings();
+  res.json({ enabled: s.features.supplies, thresholds: s.suppliesGreenlight, ...(await greenlight(s)) });
+});
+
+admin.get('/supplies/storefronts', async (req, res) => {
+  const q = parse(z.object({ status: z.enum(['none', 'pending', 'live', 'suspended']).optional() }), req.query);
+  res.json(
+    await query(
+      `SELECT s.id, s.name, s.verification_status, s.storefront_status, s.owner_user_id, s.pickup_address, s.offers_delivery, s.delivery_fee_minor,
+              s.rating_avg, s.rating_count, (SELECT count(*)::int FROM supply_products p WHERE p.seller_id = s.id) AS products
+         FROM parts_sellers s
+        WHERE s.merged_into IS NULL AND (($1::text IS NULL AND s.storefront_status <> 'none') OR s.storefront_status = $1)
+        ORDER BY s.storefront_status = 'pending' DESC, s.name LIMIT 500`,
+      [q.status ?? null],
+    ),
+  );
+});
+
+admin.post('/supplies/storefronts/:sellerId', async (req, res) => {
+  const b = parse(z.object({ status: z.enum(['live', 'suspended']), ownerUserId: uuid.optional(), reason: z.string().max(500).optional() }), req.body);
+  const id = parse(uuid, req.params.sellerId);
+  await tx(async (db) => {
+    const sl = await one<any>('SELECT * FROM parts_sellers WHERE id = $1 FOR UPDATE', [id], db);
+    if (!sl) throw notFound('Seller');
+    if (b.status === 'live' && sl.verification_status !== 'verified') throw conflict('NOT_VERIFIED', 'Only fully verified sellers can open a storefront');
+    const owner = b.ownerUserId ?? sl.owner_user_id;
+    if (b.status === 'live' && !owner) throw badRequest('OWNER_REQUIRED', 'Link a seller login (an advertiser account) first');
+    if (b.ownerUserId) {
+      const u = await one(`SELECT 1 FROM users WHERE id = $1 AND role = 'advertiser'`, [b.ownerUserId], db);
+      if (!u) throw badRequest('BAD_OWNER', 'The owner must be an advertiser/seller account');
+    }
+    await query('UPDATE parts_sellers SET storefront_status = $2, owner_user_id = $3, storefront_enabled = $4, updated_at = now() WHERE id = $1', [id, b.status, owner, b.status === 'live'], db);
+    await audit(db, req.user!.id, `storefront.${b.status}`, 'seller', id, b, b.reason);
+  });
+  res.json({ ok: true });
+});
+
+admin.get('/supplies/products', async (req, res) => {
+  const q = parse(z.object({ status: z.enum(['pending', 'approved', 'rejected']).default('pending') }), req.query);
+  res.json(await query(`SELECT p.*, s.name AS seller_name FROM supply_products p JOIN parts_sellers s ON s.id = p.seller_id WHERE p.moderation_status = $1 ORDER BY p.updated_at`, [q.status]));
+});
+
+admin.post('/supplies/products/:id/moderate', async (req, res) => {
+  const b = parse(z.object({ decision: z.enum(['approved', 'rejected']) }), req.body);
+  const r = await one('UPDATE supply_products SET moderation_status = $2 WHERE id = $1 RETURNING id', [parse(uuid, req.params.id), b.decision]);
+  if (!r) throw notFound('Product');
+  res.json({ ok: true });
+});
+
+admin.get('/supplies/orders', async (req, res) => {
+  const q = parse(z.object({ status: z.string().default('disputed') }), req.query);
+  res.json(
+    await query(
+      `SELECT o.*, s.name AS seller_name, u.full_name AS buyer_name, (SELECT json_agg(i.*) FROM supply_order_items i WHERE i.order_id = o.id) AS items
+         FROM supply_orders o JOIN parts_sellers s ON s.id = o.seller_id JOIN users u ON u.id = o.buyer_id
+        WHERE o.status = $1 ORDER BY o.updated_at`,
+      [q.status],
+    ),
+  );
+});
+
+/** Resolve a disputed order: full refund, partial refund + release, or release to the seller. */
+admin.post('/supplies/orders/:id/resolve', async (req, res) => {
+  const b = parse(z.object({ outcome: z.enum(['refund', 'partial', 'release']), refundMinor: z.number().int().positive().optional(), note: z.string().min(5).max(2000) }).refine((v) => v.outcome !== 'partial' || v.refundMinor, 'refundMinor is required'), req.body);
+  await tx(async (db) => {
+    const o = await one<any>(`SELECT * FROM supply_orders WHERE id = $1 AND status = 'disputed' FOR UPDATE`, [parse(uuid, req.params.id)], db);
+    if (!o) throw notFound('Disputed order');
+    if (b.outcome === 'refund') {
+      const p = await one<any>(`SELECT * FROM payments WHERE id = $1 AND status = 'held'`, [o.payment_id], db);
+      if (p) await refundPayment(db, p.id, p.amount_minor, `Refund: order #${o.short_code} dispute`);
+      await query(`UPDATE supply_orders SET status = 'refunded', note = coalesce(note, '') || $2, updated_at = now() WHERE id = $1`, [o.id, `\nResolution: ${b.note}`], db);
+    } else {
+      await releaseOrder(db, o.id, { refundMinor: b.outcome === 'partial' ? b.refundMinor : 0 });
+    }
+    await audit(db, req.user!.id, `supplies.order_${b.outcome}`, 'supply_order', o.id, b, b.note);
+  });
+  res.json({ ok: true });
+});
+
+admin.delete('/supplies/reviews/:id', async (req, res) => {
+  const r = await one<any>('DELETE FROM supply_reviews WHERE id = $1 RETURNING seller_id', [parse(uuid, req.params.id)]);
+  if (!r) throw notFound('Review');
+  await refreshSellerRating(pool, r.seller_id);
+  res.json({ ok: true });
+});
+
+admin.get('/supplies/analytics', async (req, res) => {
+  const q = parse(z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }), req.query);
+  res.json(
+    await one(
+      `SELECT count(*) FILTER (WHERE status NOT IN ('pending_payment', 'cancelled'))::int AS orders,
+              COALESCE(sum(total_minor) FILTER (WHERE status = 'completed'), 0)::bigint AS gmv_minor,
+              COALESCE(sum(commission_minor) FILTER (WHERE status = 'completed'), 0)::bigint AS commission_minor,
+              COALESCE(sum(discount_minor) FILTER (WHERE status = 'completed'), 0)::bigint AS bulk_discounts_minor,
+              count(*) FILTER (WHERE status = 'disputed')::int AS open_disputes,
+              count(*) FILTER (WHERE fulfilment = 'delivery' AND status = 'completed')::int AS delivered,
+              count(*) FILTER (WHERE fulfilment = 'pickup' AND status = 'completed')::int AS picked_up,
+              count(DISTINCT buyer_id) FILTER (WHERE status = 'completed')::int AS buyers,
+              count(*) FILTER (WHERE job_id IS NOT NULL)::int AS orders_linked_to_jobs
+         FROM supply_orders WHERE created_at > now() - make_interval(days => $1)`,
+      [q.days],
+    ),
+  );
 });

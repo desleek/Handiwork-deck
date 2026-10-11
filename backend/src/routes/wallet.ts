@@ -29,7 +29,7 @@ wallet.get('/', async (req, res) => {
     currency: s.currency,
     topupBonus: s.features.walletBonus && end > new Date() ? { activeUntil: end, tiers: s.walletBonusTiers } : null,
     withdrawals: {
-      enabled: req.user!.role === 'technician' || s.customerWithdrawalsEnabled,
+      enabled: req.user!.role === 'technician' || req.user!.role === 'advertiser' || s.customerWithdrawalsEnabled,
       fees: feeCfg(s),
     },
   });
@@ -116,7 +116,8 @@ wallet.get('/withdrawals', async (req, res) => {
 wallet.post('/withdrawals', async (req, res) => {
   const b = parse(z.object({ amountMinor: z.number().int().positive(), speed: z.enum(['standard', 'instant']), bankAccountId: z.string().uuid() }), req.body);
   const s = await getSettings();
-  if (req.user!.role !== 'technician' && !s.customerWithdrawalsEnabled) {
+  // Technicians and sellers withdraw earnings; customer wallet-to-bank is a fast-follow behind a setting.
+  if (req.user!.role === 'customer' && !s.customerWithdrawalsEnabled) {
     throw forbidden('WITHDRAWALS_DISABLED', 'Wallet-to-bank withdrawals for customers are coming soon');
   }
   const acct = await one<any>('SELECT * FROM bank_accounts WHERE id = $1 AND user_id = $2', [b.bankAccountId, req.user!.id]);

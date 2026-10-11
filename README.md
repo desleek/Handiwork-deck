@@ -3,7 +3,7 @@
 A multi-sided mobile marketplace connecting homeowners, offices and SMEs with local household/office technicians and construction / plant-erection tradespeople. Nigeria-first (NGN, Paystack + Flutterwave), with a provider-agnostic payment layer.
 
 ```
-backend/   Node.js + Express API, PostgreSQL schema, BullMQ worker
+backend/   Node.js + Express API, PostgreSQL schema, BullMQ worker, BOQ file parsers
 mobile/    React Native (Expo) app for iOS and Android
 docs/      Decisions log and build notes
 ```
@@ -43,9 +43,14 @@ docs/      Decisions log and build notes
 
 Turn features on with `PUT /admin/settings/features`, e.g. `{"value": {"advertising": true, "performanceMultiplier": true, "boosts": true, "walletBonus": true, "construction": false, "supplies": false}}`. Structured settings (tiers, timelines, fee schedules) are validated before they're saved.
 
-**Phase 3 (sections 13, 17)** — schema only: construction BOQ builder/parsing and milestone payments. Supplies shows a "Coming soon" waitlist.
+**Phase 3 (sections 13, 17)** — complete, also behind feature flags:
 
-**Not built yet:** the admin web panel UI. Every Section 19 admin function exists as an API under `/admin/*`, but there's no web front end for it.
+| Area | What's there |
+|---|---|
+| Construction & plant erection (17) | Site consultation with admin fee bands per trade, paid before the visit, refunded on technician no-show (disputed if they say they came), released once the BOQ is delivered or 48h after the visit. BOQ builder plus Excel/CSV/Word/PDF import with per-line flags and a mandatory review step. Line-level negotiation, rejection, and milestone payments funded one at a time with commission per milestone. Admin parse-error queue, consultation and milestone dispute resolution, and construction analytics |
+| Supplies marketplace (13) | Storefronts for verified sellers, products with bulk tiers and technician-only discounts, one-seller carts, delivery or pickup, escrowed payment released on receipt (or auto after 3 days), seller reviews, seller payouts via wallet withdrawals, and a seller mode in the app. Admin greenlight check against traction milestones before the feature can be switched on |
+
+**Not built yet:** the admin web panel UI. Every admin function (sections 12–19) exists as an API under `/admin/*`, but there's no web front end for it.
 
 ## Run it locally
 

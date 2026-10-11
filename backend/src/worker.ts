@@ -4,6 +4,7 @@ import { runEscalationStep } from './queue/escalations.ts';
 import {
   boostLifecycle,
   expireRestrictions,
+  phase3Lifecycle,
   processStandardWithdrawals,
   recalcMultipliers,
   scanIncompleteTransactions,
@@ -25,6 +26,8 @@ const workers = [
           return boostLifecycle();
         case 'ads-lifecycle':
           return refreshCampaignStatuses();
+        case 'phase3-lifecycle':
+          return phase3Lifecycle();
         case 'multiplier-recalc':
           return recalcMultipliers();
         case 'restriction-expiry':

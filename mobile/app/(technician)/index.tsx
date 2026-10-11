@@ -1,10 +1,11 @@
 import { useQuery } from '@tanstack/react-query';
+import { router } from 'expo-router';
 import * as Haptics from 'expo-haptics';
 import { useState } from 'react';
 import { Alert, Switch, View } from 'react-native';
 import { api } from '../../src/api/client';
 import { JobsList } from '../../src/components/JobsList';
-import { Banner, Card, Row, T } from '../../src/components/ui';
+import { Banner, Button, Card, Row, T } from '../../src/components/ui';
 import { startBroadcasting, stopBroadcasting } from '../../src/lib/location';
 import { queryClient } from '../../src/lib/offline';
 import { useTheme } from '../../src/theme';
@@ -13,6 +14,7 @@ import { useTheme } from '../../src/theme';
 export default function TechnicianHome() {
   const t = useTheme();
   const profile = useQuery({ queryKey: ['tech-profile'], queryFn: () => api('/technician/profile') });
+  const supplies = useQuery({ queryKey: ['supplies-status'], queryFn: () => api('/supplies/status') });
   const [busy, setBusy] = useState(false);
   const online = !!profile.data?.profile?.is_online;
   const verified = profile.data?.profile?.verification_status === 'verified';
@@ -54,6 +56,7 @@ export default function TechnicianHome() {
               <Switch value={online} disabled={busy || !verified} onValueChange={toggle} />
             </Row>
           </Card>
+          {supplies.data?.enabled ? <Button title="Buy supplies at pro prices" kind="secondary" icon="cart-outline" onPress={() => router.push('/supplies')} /> : null}
         </View>
       }
     />

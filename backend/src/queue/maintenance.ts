@@ -214,3 +214,35 @@ export async function processStandardWithdrawals() {
     }
   }
 }
+
+/**
+ * Phase 3 housekeeping:
+ *  - Consultancy fees are released to the technician 48h after the visit if no dispute was raised
+ *    (they're also released as soon as the BOQ is submitted).
+ *  - Supplies orders dispatched / ready for pickup auto-complete after the configured number of days
+ *    so sellers aren't left waiting on buyers who forget to confirm.
+ */
+export async function phase3Lifecycle() {
+  const s = await getSettings();
+  const { releaseConsultancy } = await import('../services/construction.ts');
+  const { releaseOrder } = await import('../services/supplies.ts');
+  const consultations = await query<{ id: string }>(
+    `SELECT c.id FROM site_consultations c JOIN payments p ON p.id = c.payment_id
+      WHERE c.status = 'visited' AND p.status = 'held' AND c.visited_at < now() - interval '48 hours'`,
+  );
+  for (const c of consultations) await tx((db) => releaseConsultancy(db, c.id, s, null)).catch((err) => logger.warn({ err }, 'consultancy release failed'));
+  const orders = await query<{ id: string; buyer_id: string; short_code: string }>(
+    `SELECT id, buyer_id, short_code FROM supply_orders
+      WHERE status IN ('dispatched', 'ready_for_pickup') AND dispatched_at < now() - make_interval(days => $1)`,
+    [s.suppliesAutoConfirmDays],
+  );
+  for (const o of orders) {
+    try {
+      await tx((db) => releaseOrder(db, o.id));
+      await notify({ userId: o.buyer_id, type: 'supplies.auto_completed', title: `Order #${o.short_code} completed`, body: 'We marked your order as received. Rate the seller from your orders.' });
+    } catch (err) {
+      logger.warn({ err, orderId: o.id }, 'supplies auto-complete failed');
+    }
+  }
+  return { consultancyReleased: consultations.length, ordersCompleted: orders.length };
+}

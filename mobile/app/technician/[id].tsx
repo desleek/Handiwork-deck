@@ -61,7 +61,11 @@ export default function TechnicianProfile() {
               <T style={t.font.money}>from {formatMoney(c.startingPriceMinor)}</T>
             </Row>
             <T v="tiny" muted>{c.laborOnly}</T>
-            <Button title={`Book ${c.name}`} kind="secondary" onPress={() => router.push({ pathname: '/book/[technicianId]', params: { technicianId: data.id, categoryId: c.id } })} />
+            <Button
+              title={c.supercategory === 'construction' ? `Request a site visit` : `Book ${c.name}`}
+              kind="secondary"
+              onPress={() => router.push({ pathname: '/book/[technicianId]', params: { technicianId: data.id, categoryId: c.id, construction: c.supercategory === 'construction' ? '1' : '0' } })}
+            />
           </View>
         ))}
       </Card>

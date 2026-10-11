@@ -10,7 +10,8 @@ import { useTheme } from '../../src/theme';
 
 export default function Book() {
   const t = useTheme();
-  const { technicianId, categoryId } = useLocalSearchParams<{ technicianId: string; categoryId: string }>();
+  const { technicianId, categoryId, construction } = useLocalSearchParams<{ technicianId: string; categoryId: string; construction?: string }>();
+  const isConstruction = construction === '1';
   const [description, setDescription] = useState('');
   const [address, setAddress] = useState('');
   const [instant, setInstant] = useState(true);
@@ -39,9 +40,17 @@ export default function Book() {
         <Banner tone="danger" text={err.message} />
       ) : null}
       <T v="small" muted>What needs doing?</T>
-      <TextInput value={description} onChangeText={setDescription} multiline placeholder="e.g. Kitchen sink is leaking under the cabinet" placeholderTextColor={t.color.textMuted} style={[input, { minHeight: 110, textAlignVertical: 'top' }]} />
+      <TextInput value={description} onChangeText={setDescription} multiline placeholder={isConstruction ? 'e.g. 3-bedroom bungalow, foundation to roofing, plot size 50×100ft' : 'e.g. Kitchen sink is leaking under the cabinet'} placeholderTextColor={t.color.textMuted} style={[input, { minHeight: 110, textAlignVertical: 'top' }]} />
       <T v="small" muted>Address</T>
       <TextInput value={address} onChangeText={setAddress} placeholder="Street, area, city" placeholderTextColor={t.color.textMuted} style={input} />
+      {isConstruction ? (
+        <Card>
+          <T v="heading">How construction jobs work</T>
+          <T v="small" muted>1. The technician quotes a fee to inspect and measure the site, and you pay it to book the visit.</T>
+          <T v="small" muted>2. After the visit they send an itemized Bill of Quantities with milestones (e.g. foundation, walls, roofing).</T>
+          <T v="small" muted>3. You fund one milestone at a time; each is released only when you sign it off.</T>
+        </Card>
+      ) : (
       <Card>
         <Row style={{ justifyContent: 'space-between' }}>
           <T style={{ flex: 1 }}>Instant book</T>
@@ -54,8 +63,9 @@ export default function Book() {
         </Row>
         <T v="small" muted>Fast Track shortens response deadlines if you challenge a parts price.</T>
       </Card>
+      )}
       <T v="small" muted>Your phone number stays hidden until you approve and pay. Chat in the app in the meantime.</T>
-      <Button title="Send booking" loading={book.isPending} disabled={description.trim().length < 10 || address.trim().length < 5} onPress={() => book.mutate()} />
+      <Button title={isConstruction ? 'Request site visit' : 'Send booking'} loading={book.isPending} disabled={description.trim().length < 10 || address.trim().length < 5} onPress={() => book.mutate()} />
     </Screen>
   );
 }

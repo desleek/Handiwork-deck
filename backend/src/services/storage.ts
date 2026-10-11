@@ -7,12 +7,13 @@ import { badRequest } from '../lib/http.ts';
  * The API issues a short-lived signed upload; the client uploads the bytes itself, then sends
  * back the resulting URL. Driver: S3 or Cloudinary (or "local" for development).
  */
-export type UploadKind = 'portfolio' | 'receipt' | 'evidence' | 'id_document' | 'certification' | 'boq' | 'avatar' | 'ad_creative';
+export type UploadKind = 'portfolio' | 'receipt' | 'evidence' | 'id_document' | 'certification' | 'boq' | 'avatar' | 'ad_creative' | 'product';
 
 const RULES: Record<UploadKind, { types: string[]; maxBytes: number }> = {
   portfolio: { types: ['image/jpeg', 'image/png', 'image/webp'], maxBytes: 8e6 },
   avatar: { types: ['image/jpeg', 'image/png', 'image/webp'], maxBytes: 4e6 },
   ad_creative: { types: ['image/jpeg', 'image/png', 'image/webp'], maxBytes: 4e6 },
+  product: { types: ['image/jpeg', 'image/png', 'image/webp'], maxBytes: 6e6 },
   receipt: { types: ['image/jpeg', 'image/png', 'application/pdf'], maxBytes: 10e6 },
   evidence: { types: ['image/jpeg', 'image/png', 'application/pdf'], maxBytes: 10e6 },
   id_document: { types: ['image/jpeg', 'image/png', 'application/pdf'], maxBytes: 10e6 },

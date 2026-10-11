@@ -142,7 +142,7 @@ catalog.get('/technicians/:id', authenticate, requireUser(), async (req, res) =>
 
   const [categories, portfolio, certifications, reviews, scoreSummary] = await Promise.all([
     query(
-      `SELECT c.id, c.name, c.icon, tc.starting_price_minor, tc.labor_only_stance
+      `SELECT c.id, c.name, c.icon, c.supercategory, tc.starting_price_minor, tc.labor_only_stance
          FROM technician_categories tc JOIN service_categories c ON c.id = tc.category_id
         WHERE tc.technician_id = $1 AND c.is_active ORDER BY c.name`,
       [id],

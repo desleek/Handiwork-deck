@@ -1,4 +1,4 @@
-import { Router } from 'express';
+import { Router, type NextFunction, type Request, type Response } from 'express';
 import { z } from 'zod';
 import { one, pool, query, tx } from '../db/pool.ts';
 import { evaluateLaborOnlyRejection, windowStart } from '../domain/laborOnly.ts';
@@ -26,6 +26,12 @@ import { getSettings } from '../services/settings.ts';
 
 export const quotes = Router({ mergeParams: true });
 quotes.use(authenticate, requireUser());
+// Quotes, labor-only, price challenges and labor negotiation are standard-job flows only.
+quotes.use(async (req: Request, _res: Response, next: NextFunction) => {
+  const j = await one<{ kind: string }>('SELECT kind FROM jobs WHERE id = $1', [req.params.id]).catch(() => undefined);
+  if (j?.kind === 'construction') return next(conflict('USE_CONSTRUCTION_FLOW', 'Construction projects use the BOQ flow'));
+  next();
+});
 
 const uuid = z.string().uuid();
 const jobIdOf = (req: any) => parse(uuid, req.params.id);

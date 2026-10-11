@@ -21,7 +21,7 @@ function Gate() {
     if (state.status === 'signed_out' && group !== '(auth)') router.replace('/(auth)/sign-in');
     else if (state.status === 'needs_registration') router.replace('/(auth)/register');
     else if (state.status === 'ready') {
-      const home = state.me.role === 'technician' ? '(technician)' : '(customer)';
+      const home = state.me.role === 'technician' ? '(technician)' : state.me.role === 'advertiser' ? '(seller)' : '(customer)';
       if (group === '(auth)' || group === undefined) router.replace(`/${home}`);
     }
   }, [state, segments, router]);
@@ -58,6 +58,13 @@ function Gate() {
       <Stack.Screen name="job/[id]/challenge" options={{ title: 'Challenge a price', presentation: 'modal' }} />
       <Stack.Screen name="job/[id]/pay" options={{ title: 'Payment', presentation: 'modal' }} />
       <Stack.Screen name="promote" options={{ title: 'Promote' }} />
+      <Stack.Screen name="job/[id]/boq" options={{ title: 'Bill of Quantities' }} />
+      <Stack.Screen name="supplies/index" options={{ title: 'Supplies' }} />
+      <Stack.Screen name="supplies/[id]" options={{ title: 'Product' }} />
+      <Stack.Screen name="supplies/cart" options={{ title: 'Cart' }} />
+      <Stack.Screen name="supplies/orders" options={{ title: 'My orders' }} />
+      <Stack.Screen name="(seller)" options={{ headerShown: false }} />
+      <Stack.Screen name="seller/product" options={{ title: 'Product', presentation: 'modal' }} />
       {/* Mandatory review: no back gesture, no header back — it's quick, not punitive. */}
       <Stack.Screen name="job/[id]/rate" options={{ title: 'Rate your job', gestureEnabled: false, headerBackVisible: false }} />
     </Stack>

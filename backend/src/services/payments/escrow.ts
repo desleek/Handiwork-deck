@@ -12,7 +12,7 @@ import { postLedger } from '../wallet.ts';
 import { checkoutWithFallback, getProvider } from './router.ts';
 import type { Channel } from './types.ts';
 
-export type Purpose = 'job' | 'consultancy' | 'milestone' | 'boost' | 'push_alert' | 'wallet_topup' | 'ad_campaign';
+export type Purpose = 'job' | 'consultancy' | 'milestone' | 'boost' | 'push_alert' | 'wallet_topup' | 'ad_campaign' | 'supplies_order';
 
 export interface StartPaymentInput {
   payer: { id: string; email: string | null; full_name: string; phone_e164: string | null };
@@ -24,8 +24,16 @@ export interface StartPaymentInput {
   jobId?: string;
   quoteId?: string;
   boostId?: string;
+  milestoneId?: string;
+  supplyOrderId?: string;
   metadata?: Record<string, unknown>;
 }
+
+const LEDGER_TYPE: Partial<Record<Purpose, 'boost_purchase' | 'supplies_purchase'>> = {
+  boost: 'boost_purchase',
+  push_alert: 'boost_purchase',
+  supplies_order: 'supplies_purchase',
+};
 
 /**
  * Single entry point for every money-in flow (Section 11): jobs, consultancy, milestones,
@@ -41,15 +49,15 @@ export async function startPayment(input: StartPaymentInput) {
   if (input.channel === 'wallet') {
     await tx(async (db) => {
       await query(
-        `INSERT INTO payments (id, payer_id, purpose, job_id, quote_id, boost_id, channel, provider, amount_minor, currency, metadata)
-         VALUES ($1,$2,$3,$4,$5,$6,'wallet','wallet',$7,$8,$9)`,
+        `INSERT INTO payments (id, payer_id, purpose, job_id, quote_id, boost_id, milestone_id, supply_order_id, channel, provider, amount_minor, currency, metadata)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,'wallet','wallet',$9,$10,$11)`,
         [id, input.payer.id, input.purpose, input.jobId ?? null, input.quoteId ?? null, input.boostId ?? null,
-          input.amountMinor, input.currency, JSON.stringify(input.metadata ?? {})],
+          input.milestoneId ?? null, input.supplyOrderId ?? null, input.amountMinor, input.currency, JSON.stringify(input.metadata ?? {})],
         db,
       );
       await postLedger(db, {
         userId: input.payer.id,
-        type: input.purpose === 'boost' || input.purpose === 'push_alert' ? 'boost_purchase' : 'job_payment',
+        type: LEDGER_TYPE[input.purpose] ?? 'job_payment',
         amountMinor: -input.amountMinor,
         description: input.description,
         paymentId: id,
@@ -76,9 +84,10 @@ export async function startPayment(input: StartPaymentInput) {
     metadata: { purpose: input.purpose, jobId: input.jobId, ...(input.metadata ?? {}) },
   });
   await query(
-    `INSERT INTO payments (id, payer_id, purpose, job_id, quote_id, boost_id, channel, provider, provider_ref, amount_minor, currency, checkout, metadata)
-     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)`,
-    [id, input.payer.id, input.purpose, input.jobId ?? null, input.quoteId ?? null, input.boostId ?? null, input.channel,
+    `INSERT INTO payments (id, payer_id, purpose, job_id, quote_id, boost_id, milestone_id, supply_order_id, channel, provider, provider_ref, amount_minor, currency, checkout, metadata)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)`,
+    [id, input.payer.id, input.purpose, input.jobId ?? null, input.quoteId ?? null, input.boostId ?? null,
+      input.milestoneId ?? null, input.supplyOrderId ?? null, input.channel,
       provider.name, result.providerRef, input.amountMinor, input.currency, JSON.stringify(result), JSON.stringify(input.metadata ?? {})],
   );
   if (input.channel === 'bank_transfer' && result.virtualAccount) {
@@ -163,6 +172,17 @@ export async function onPaymentSucceeded(paymentId: string, feeMinor: number | n
             await enqueuePushAlert(alertId);
           });
         }
+        break;
+      }
+      case 'consultancy':
+      case 'milestone': {
+        const { onConstructionPaymentHeld } = await import('../construction.ts');
+        effects.push(...(await onConstructionPaymentHeld(db, p)));
+        break;
+      }
+      case 'supplies_order': {
+        const { onSupplyOrderPaid } = await import('../supplies.ts');
+        effects.push(...(await onSupplyOrderPaid(db, p)));
         break;
       }
       case 'ad_campaign': {
