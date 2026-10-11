@@ -1,6 +1,6 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import * as WebBrowser from 'expo-web-browser';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Alert, TextInput, View } from 'react-native';
 import { api, ApiError } from '../api/client';
 import { bpsToPct, formatMoney, toMinor } from '../lib/money';
@@ -30,6 +30,17 @@ export function WalletView() {
   const ledger = useQuery({ queryKey: ['ledger'], queryFn: () => api<any[]>('/wallet/ledger') });
   const banks = useQuery({ queryKey: ['banks'], queryFn: () => api<any[]>('/wallet/bank-accounts'), enabled: !!wallet.data?.withdrawals.enabled });
   const refresh = () => ['wallet', 'ledger'].forEach((k) => queryClient.invalidateQueries({ queryKey: [k] }));
+  // Bonus preview while typing (Section 15): shows the bonus and a nudge to the next tier.
+  const [debounced, setDebounced] = useState(0);
+  useEffect(() => {
+    const h = setTimeout(() => setDebounced(toMinor(amount || 0)), 350);
+    return () => clearTimeout(h);
+  }, [amount]);
+  const preview = useQuery({
+    queryKey: ['topup-preview', debounced],
+    queryFn: () => api('/wallet/topups/preview', { query: { amountMinor: debounced } }),
+    enabled: debounced > 0 && !!wallet.data?.topupBonus,
+  });
   const input = { backgroundColor: t.color.bg, borderRadius: t.radius.sm, padding: t.space(3), color: t.color.text, borderWidth: 1, borderColor: t.color.border, fontSize: 18 };
 
   const topup = useMutation({
@@ -78,6 +89,18 @@ export function WalletView() {
 
       <Card>
         <TextInput value={amount} onChangeText={setAmount} keyboardType="numeric" placeholder="Amount (₦)" placeholderTextColor={t.color.textMuted} style={input} />
+        {preview.data ? (
+          <View style={{ gap: 2 }}>
+            {preview.data.bonusMinor > 0 ? (
+              <T v="small" style={{ color: t.color.primary }}>
+                Top up {formatMoney(preview.data.amountMinor)} → {formatMoney(preview.data.creditedMinor)} in your wallet (+{bpsToPct(preview.data.bonusBps)} bonus)
+              </T>
+            ) : null}
+            {preview.data.nextTier ? (
+              <T v="tiny" muted>Add {formatMoney(preview.data.nextTier.addMinor)} more to earn a {bpsToPct(preview.data.nextTier.bonusBps)} bonus.</T>
+            ) : null}
+          </View>
+        ) : null}
         <Row>
           <View style={{ flex: 1 }}>
             <Button

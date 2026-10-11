@@ -1,7 +1,6 @@
-import { useMutation, useQuery } from '@tanstack/react-query';
-import { useState } from 'react';
-import { Alert, Pressable } from 'react-native';
-import { api, ApiError } from '../../src/api/client';
+import { useQuery } from '@tanstack/react-query';
+import { router } from 'expo-router';
+import { api } from '../../src/api/client';
 import { Banner, Button, Card, Divider, Row, Screen, T, Tag } from '../../src/components/ui';
 import { bpsToPct, formatMoney } from '../../src/lib/money';
 import { useTheme } from '../../src/theme';
@@ -10,25 +9,10 @@ import { useTheme } from '../../src/theme';
 export default function Earnings() {
   const t = useTheme();
   const { data, refetch } = useQuery({ queryKey: ['earnings'], queryFn: () => api('/technician/earnings') });
-  const profile = useQuery({ queryKey: ['tech-profile'], queryFn: () => api('/technician/profile') });
-  const [hours, setHours] = useState(1);
-
-  const boost = useMutation({
-    mutationFn: ({ categoryId, kind }: { categoryId: string; kind: 'boost' | 'alert' }) =>
-      kind === 'boost'
-        ? api('/technician/boosts', { body: { categoryId, hours, channel: 'wallet' } })
-        : api('/technician/push-alerts', { body: { categoryId, channel: 'wallet' } }),
-    onSuccess: () => {
-      Alert.alert('Done', 'Your promotion is live.');
-      refetch();
-    },
-    onError: (e: ApiError) => Alert.alert('Not available', e.message),
-  });
 
   if (!data) return null;
   const p = data.performance;
   const sign = (bps: number) => (bps > 0 ? '+' : bps < 0 ? '−' : '') + bpsToPct(Math.abs(bps));
-  const firstCategory = profile.data?.categories?.[0];
 
   return (
     <Screen>
@@ -64,25 +48,12 @@ export default function Earnings() {
 
       <Card>
         <T v="heading">Get more customers</T>
-        {!data.boostEligibility.eligible ? (
-          <Banner text={`Promotions unlock at a ${data.boostEligibility.minRating}★ rolling rating, so paid visibility always reflects good work.`} />
-        ) : !firstCategory ? (
-          <T muted>Add a service on your profile first.</T>
+        {data.boostEligibility.eligible ? (
+          <T v="small" muted>Boost your placement or tell nearby customers you're available right now.</T>
         ) : (
-          <>
-            <T muted>Priority placement in {firstCategory.name}, clearly labelled "Promoted".</T>
-            <Row>
-              {[1, 4, 24].map((h) => (
-                <Pressable key={h} onPress={() => setHours(h)} style={{ paddingVertical: 6, paddingHorizontal: 12, borderRadius: 100, backgroundColor: hours === h ? t.color.primary : t.color.surfaceAlt }}>
-                  <T v="small" style={{ color: hours === h ? t.color.primaryText : t.color.text }}>{h}h</T>
-                </Pressable>
-              ))}
-            </Row>
-            <Button title={`Boost for ${hours}h (paid from wallet)`} kind="secondary" loading={boost.isPending} onPress={() => boost.mutate({ categoryId: firstCategory.category_id, kind: 'boost' })} />
-            <Button title="Send 'I'm available now' alert" kind="secondary" loading={boost.isPending} onPress={() => boost.mutate({ categoryId: firstCategory.category_id, kind: 'alert' })} />
-            <T v="tiny" muted>Promotions are a service fee paid through Handiwork-Deck, separate from job commission.</T>
-          </>
+          <Banner text={`Promotions unlock at a ${data.boostEligibility.minRating}★ rolling rating, so paid visibility always reflects good work.`} />
         )}
+        <Button title="Promote" kind="secondary" disabled={!data.boostEligibility.eligible} onPress={() => router.push('/promote')} />
       </Card>
     </Screen>
   );

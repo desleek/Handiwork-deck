@@ -33,3 +33,12 @@ Defaults chosen during the first build. Every item marked ⚙️ is an admin set
 - **Phase gating:** Phase 2/3 features ship switched off ⚙️ `features.*`.
 - **Category list:** exact duplicates in the spec ("Phone repair", "Photographer request") were seeded once. Near-duplicates ("Electrical" / "Electrical repair", "Cleaning services" / "Cleaner request") were kept so an admin can merge or deactivate them.
 - **Account deletion** anonymises personal data and keeps job, payment and review records anonymised for audit. It's blocked while funded jobs are open or the wallet has a balance.
+
+## Phase 2 defaults
+
+- **Gateway fee schedules** ⚙️ `gatewayFeeSchedules`: Paystack 1.5% + ₦100 (₦100 waived under ₦2,500), capped at ₦2,000; dedicated virtual accounts 1% capped at ₦300. Flutterwave 1.4% capped at ₦2,000. Payout fees ₦10 / ₦25 / ₦50 by amount band. Taken from the providers' published Nigerian pricing in October 2026 — replace with your signed rate card.
+- **Wallet bonus economics:** at a ₦25,000 average job, every default tier is funded by fee savings. When the average job approaches ₦50,000, the 0.1% tier on a ₦50,000 card top-up stops being funded (one capped top-up fee ≈ one job fee), but stays funded if topped up by virtual account. The admin economics report uses the real 90-day average job value once there are 20+ paid jobs, and saving tiers that lose money returns warnings (it doesn't block).
+- **Ad slot prices** ⚙️ `adSlotPricePerDayMinor`: ₦5,000/day featured Deals, ₦3,000/day brand Deals, ₦10,000/day sponsored search; campaigns run 1–90 days. These are placeholders — set them from real demand.
+- **Ad lifecycle:** submitted → admin review (rejections need a reason) → paid (gateway, wallet, offline invoice recorded by an admin, or fee waived) → live inside its date window. Impressions and clicks count once per user per campaign per day.
+- **Boost overlap:** a technician can't hold two boosts for the same service at the same time; the app offers a later start instead.
+- **Abandoned checkouts:** unpaid boosts and alerts are released after 30 minutes so they don't block the slot or count toward the daily alert limit.

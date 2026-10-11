@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { one, query, tx } from '../db/pool.ts';
-import { bonusWindowEnd, withdrawalQuote } from '../domain/wallet.ts';
+import { bonusWindowEnd, topupBonus, withdrawalQuote } from '../domain/wallet.ts';
 import { badRequest, conflict, forbidden, notFound, parse } from '../lib/http.ts';
 import { logger } from '../lib/logger.ts';
 import { authenticate, requireUser } from '../middleware/auth.ts';
@@ -45,6 +45,26 @@ wallet.get('/ledger', async (req, res) => {
       [req.user!.id, q.before ?? null, q.limit],
     ),
   );
+});
+
+/** Shows the bonus a top-up would earn before the customer commits (Section 15). */
+wallet.get('/topups/preview', async (req, res) => {
+  const q = parse(z.object({ amountMinor: z.coerce.number().int().positive() }), req.query);
+  const s = await getSettings();
+  const u = await one<{ created_at: Date; wallet_bonus_until: Date | null }>('SELECT created_at, wallet_bonus_until FROM users WHERE id = $1', [req.user!.id]);
+  const windowEnd = bonusWindowEnd(u!.created_at, s.walletBonusWindowDays, u!.wallet_bonus_until);
+  const bonus = topupBonus({ amountMinor: q.amountMinor, now: new Date(), windowEnd, tiers: s.walletBonusTiers, enabled: s.features.walletBonus });
+  // Next tier up, so the app can nudge: "add ₦X more to earn Y%".
+  const next = s.features.walletBonus && windowEnd > new Date()
+    ? s.walletBonusTiers.filter((t) => t.bonusBps > bonus.bonusBps && t.minTopupMinor > q.amountMinor).sort((a, b) => a.minTopupMinor - b.minTopupMinor)[0]
+    : undefined;
+  res.json({
+    amountMinor: q.amountMinor,
+    ...bonus,
+    creditedMinor: q.amountMinor + bonus.bonusMinor,
+    windowEndsAt: s.features.walletBonus ? windowEnd : null,
+    nextTier: next ? { addMinor: next.minTopupMinor - q.amountMinor, bonusBps: next.bonusBps } : null,
+  });
 });
 
 wallet.post('/topups', async (req, res) => {

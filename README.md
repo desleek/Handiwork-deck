@@ -32,7 +32,18 @@ docs/      Decisions log and build notes
 | Wallet ledger, standard & instant withdrawals with fee shown up front | ✅ | ✅ |
 | Account deletion, content reporting, no contacts permission, no IAP | ✅ | ✅ |
 
-**Phase 2 / 3 (sections 7a, 12, 13, 15 bonus, 16, 17)** — the database schema, settings and most API logic are already in place, switched off behind admin feature flags (`features.*` in settings): performance multiplier, boosts & push alerts, wallet top-up bonus, ads, construction. Construction BOQ builder/parsing and milestone payments have schema only. Supplies shows a "Coming soon" waitlist.
+**Phase 2 (sections 7a, 12, 15, 16)** — complete, shipped switched off so you can turn each on when traction justifies it:
+
+| Area | What's there |
+|---|---|
+| Performance-based labor rate (7a) | Bi-weekly recalculation, tiers and cycle editable, anomalous swings held for admin review, "recalculate now", technician dashboard with next-tier thresholds |
+| Advertising (12) | Admin-managed campaigns plus an advertiser self-serve API (submit → admin review → pay → live), per-day slot pricing, impression/click tracking (de-duplicated), ad revenue and CTR analytics; failures degrade to "no ads" and never touch discovery |
+| Wallet bonus economics (15) | Fee schedules for Paystack and Flutterwave, a per-tier margin model, realised 90-day margin, top-up bonus preview in the app, and a warning whenever an admin saves tiers that cost more than the fees they save |
+| Boosts & push alerts (16) | 3★ gate enforced at purchase, price/eligibility preview, scheduling, no overlapping boosts, abandoned checkouts released after 30 min, daily alert cap, Promote screen in the app |
+
+Turn features on with `PUT /admin/settings/features`, e.g. `{"value": {"advertising": true, "performanceMultiplier": true, "boosts": true, "walletBonus": true, "construction": false, "supplies": false}}`. Structured settings (tiers, timelines, fee schedules) are validated before they're saved.
+
+**Phase 3 (sections 13, 17)** — schema only: construction BOQ builder/parsing and milestone payments. Supplies shows a "Coming soon" waitlist.
 
 **Not built yet:** the admin web panel UI. Every Section 19 admin function exists as an API under `/admin/*`, but there's no web front end for it.
 

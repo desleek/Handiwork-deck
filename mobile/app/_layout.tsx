@@ -57,6 +57,7 @@ function Gate() {
       <Stack.Screen name="job/[id]/quote" options={{ title: 'Build quote' }} />
       <Stack.Screen name="job/[id]/challenge" options={{ title: 'Challenge a price', presentation: 'modal' }} />
       <Stack.Screen name="job/[id]/pay" options={{ title: 'Payment', presentation: 'modal' }} />
+      <Stack.Screen name="promote" options={{ title: 'Promote' }} />
       {/* Mandatory review: no back gesture, no header back — it's quick, not punitive. */}
       <Stack.Screen name="job/[id]/rate" options={{ title: 'Rate your job', gestureEnabled: false, headerBackVisible: false }} />
     </Stack>

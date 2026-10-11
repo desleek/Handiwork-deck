@@ -6,6 +6,7 @@ import { applyMultiplier } from '../domain/pricing.ts';
 import { multiplierContext } from '../domain/ratings.ts';
 import { notFound, parse } from '../lib/http.ts';
 import { authenticate, requireUser } from '../middleware/auth.ts';
+import { adsLive, liveAds, recordAdEvent } from '../services/ads.ts';
 import { getSettings } from '../services/settings.ts';
 
 export const catalog = Router();
@@ -89,19 +90,8 @@ catalog.get('/technicians', authenticate, requireUser(), async (req, res) => {
   }));
   const ranked = rankCandidates(candidates, s.boostTieBreak, Math.floor(Date.now() / 3_600_000)).slice(0, q.limit);
 
-  let ads: any[] = [];
-  if (s.features.advertising && s.adsEnabled) {
-    ads = await query(
-      `SELECT c.id, cr.title, cr.body, cr.image_url, cr.click_url, ps.name AS seller_name
-         FROM ad_campaigns c JOIN ad_creatives cr ON cr.campaign_id = c.id
-         LEFT JOIN parts_sellers ps ON ps.id = c.seller_id
-        WHERE c.placement = 'sponsored_search' AND c.status = 'active'
-          AND (c.starts_at IS NULL OR c.starts_at <= now()) AND (c.ends_at IS NULL OR c.ends_at > now())
-          AND ($1::uuid IS NULL OR cardinality(c.target_category_ids) = 0 OR $1 = ANY(c.target_category_ids))
-        LIMIT 5`,
-      [q.categoryId ?? null],
-    );
-  }
+  // Isolated: a failure in the ads module returns [] and never affects technician results.
+  const ads = await liveAds(['sponsored_search'], q.categoryId ?? null, Math.ceil(q.limit / s.sponsoredMaxPerOrganic));
 
   const multiplierOn = s.features.performanceMultiplier;
   const items = interleaveSponsored(ranked, ads, s.sponsoredMaxPerOrganic).map((entry) => {
@@ -220,16 +210,17 @@ catalog.get('/sellers', authenticate, requireUser(), async (req, res) => {
 
 /** Marketplace / Deals tab — isolated ads module. Returns an empty state when disabled. */
 catalog.get('/deals', authenticate, requireUser(), async (_req, res) => {
-  const s = await getSettings();
-  if (!(s.features.advertising && s.adsEnabled)) return res.json({ enabled: false, featuredSellers: [], ads: [] });
+  if (!(await adsLive())) return res.json({ enabled: false, featuredSellers: [], ads: [] });
   const [featuredSellers, ads] = await Promise.all([
-    query(`SELECT id, name, address FROM parts_sellers WHERE verification_status = 'verified' ORDER BY clean_approvals DESC LIMIT 10`),
-    query(
-      `SELECT c.id, c.placement, cr.title, cr.body, cr.image_url, cr.click_url FROM ad_campaigns c
-         JOIN ad_creatives cr ON cr.campaign_id = c.id
-        WHERE c.status = 'active' AND c.placement IN ('deals_featured', 'deals_brand')
-          AND (c.starts_at IS NULL OR c.starts_at <= now()) AND (c.ends_at IS NULL OR c.ends_at > now())`,
-    ),
+    query(`SELECT id, name, address FROM parts_sellers WHERE verification_status = 'verified' AND merged_into IS NULL ORDER BY clean_approvals DESC LIMIT 10`).catch(() => []),
+    liveAds(['deals_featured', 'deals_brand'], null, 20),
   ]);
   res.json({ enabled: true, featuredSellers, ads });
+});
+
+/** Impression / click tracking for sponsored slots and Deals. Fire-and-forget from the app. */
+catalog.post('/ads/:id/events', authenticate, requireUser(), async (req, res) => {
+  const b = parse(z.object({ type: z.enum(['impression', 'click']) }), req.body);
+  await recordAdEvent(parse(z.string().uuid(), req.params.id), req.user!.id, b.type);
+  res.status(204).end();
 });

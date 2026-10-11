@@ -1,7 +1,8 @@
 import { useMutation, useQuery } from '@tanstack/react-query';
 import { Image } from 'expo-image';
 import * as WebBrowser from 'expo-web-browser';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import { trackClick, trackImpression } from '../../src/lib/adTracking';
 import { Pressable } from 'react-native';
 import { api } from '../../src/api/client';
 import { Button, Card, Empty, Row, Screen, T, Tag } from '../../src/components/ui';
@@ -11,6 +12,29 @@ import { useTheme } from '../../src/theme';
  * Marketplace / Deals (Section 12) — fully separate from booking, payment, chat and rating flows.
  * Plus the reserved Supplies section (Section 13): "Coming soon" with a waitlist.
  */
+function DealCard({ ad }: { ad: any }) {
+  const t = useTheme();
+  useEffect(() => trackImpression(ad.id), [ad.id]);
+  return (
+    <Pressable
+      onPress={() => {
+        trackClick(ad.id);
+        if (ad.click_url) WebBrowser.openBrowserAsync(ad.click_url);
+      }}
+    >
+      <Card style={{ backgroundColor: t.color.sponsoredBg }}>
+        <Row style={{ justifyContent: 'space-between' }}>
+          <Tag label="Sponsored" />
+          {ad.seller_name ? <T v="tiny" muted>{ad.seller_name}</T> : null}
+        </Row>
+        <Image source={{ uri: ad.image_url }} style={{ height: 140, borderRadius: t.radius.sm }} contentFit="cover" />
+        <T v="heading">{ad.title}</T>
+        {ad.body ? <T muted>{ad.body}</T> : null}
+      </Card>
+    </Pressable>
+  );
+}
+
 export default function Deals() {
   const t = useTheme();
   const [tab, setTab] = useState<'deals' | 'supplies'>('deals');
@@ -38,16 +62,8 @@ export default function Deals() {
         <Empty title="Deals are coming" body="Offers from verified spare-parts sellers and brands will appear here." />
       ) : (
         <>
-          {deals.data.ads.map((ad: any) => (
-            <Pressable key={ad.id} onPress={() => ad.click_url && WebBrowser.openBrowserAsync(ad.click_url)}>
-              <Card style={{ backgroundColor: t.color.sponsoredBg }}>
-                <Tag label="Sponsored" />
-                <Image source={{ uri: ad.image_url }} style={{ height: 140, borderRadius: t.radius.sm }} contentFit="cover" />
-                <T v="heading">{ad.title}</T>
-                {ad.body ? <T muted>{ad.body}</T> : null}
-              </Card>
-            </Pressable>
-          ))}
+          {deals.data.ads.length === 0 && deals.data.featuredSellers.length === 0 ? <Empty title="No deals right now" body="Check back soon." /> : null}
+          {deals.data.ads.map((ad: any) => <DealCard key={ad.id} ad={ad} />)}
           <T v="heading">Verified sellers</T>
           {deals.data.featuredSellers.map((s: any) => (
             <Card key={s.id}>

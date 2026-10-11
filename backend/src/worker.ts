@@ -10,6 +10,7 @@ import {
   sendPushAlert,
 } from './queue/maintenance.ts';
 import { connection, QUEUE, registerRepeatables } from './queue/queues.ts';
+import { refreshCampaignStatuses } from './services/ads.ts';
 
 const workers = [
   new Worker(QUEUE.escalations, async (job) => runEscalationStep(job.data.challengeId, job.data.step), { connection, concurrency: 10 }),
@@ -22,6 +23,8 @@ const workers = [
           return scanIncompleteTransactions();
         case 'boost-lifecycle':
           return boostLifecycle();
+        case 'ads-lifecycle':
+          return refreshCampaignStatuses();
         case 'multiplier-recalc':
           return recalcMultipliers();
         case 'restriction-expiry':

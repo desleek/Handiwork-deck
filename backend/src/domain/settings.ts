@@ -4,6 +4,8 @@
  * Money values are in minor units (kobo). Percentages are basis points (100 bps = 1%).
  */
 
+import { DEFAULT_FEE_SCHEDULES, type FeeSchedule } from './fees.ts';
+
 export interface RatingTier {
   /** Minimum rolling average (inclusive) to be in this tier. */
   minRating: number;
@@ -71,6 +73,10 @@ export interface PlatformSettings {
 
   // Section 11 — gateways
   gatewayPriority: string[];
+  /** Per-provider fee schedules used for bonus economics and margin reporting (Section 15). */
+  gatewayFeeSchedules: Record<string, FeeSchedule>;
+  /** Fallback average job value for economics when there isn't enough real data yet. */
+  economicsAvgJobMinor: number;
 
   // Section 15 — wallet & withdrawals
   walletBonusWindowDays: number;
@@ -93,6 +99,9 @@ export interface PlatformSettings {
   // Section 12 — ads
   adsEnabled: boolean;
   sponsoredMaxPerOrganic: number;
+  /** Price per day for each placement (admin "slot pricing"). */
+  adSlotPricePerDayMinor: Record<'deals_featured' | 'deals_brand' | 'sponsored_search', number>;
+  adMaxCampaignDays: number;
 
   // Section 17 — construction
   consultancyFeeBands: Record<string, { minMinor: number; maxMinor: number }>;
@@ -169,6 +178,8 @@ export const DEFAULT_SETTINGS: PlatformSettings = {
   sellerAutoVerifyAfterCleanApprovals: 5,
 
   gatewayPriority: ['paystack', 'flutterwave', 'stripe'],
+  gatewayFeeSchedules: DEFAULT_FEE_SCHEDULES,
+  economicsAvgJobMinor: 25_000 * NAIRA,
 
   walletBonusWindowDays: 90,
   walletBonusTiers: [
@@ -193,6 +204,8 @@ export const DEFAULT_SETTINGS: PlatformSettings = {
 
   adsEnabled: false,
   sponsoredMaxPerOrganic: 10,
+  adSlotPricePerDayMinor: { deals_featured: 5_000 * NAIRA, deals_brand: 3_000 * NAIRA, sponsored_search: 10_000 * NAIRA },
+  adMaxCampaignDays: 90,
 
   consultancyFeeBands: {},
   consultancyRefundOnNoShow: true,

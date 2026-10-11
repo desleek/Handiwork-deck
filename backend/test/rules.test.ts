@@ -212,3 +212,50 @@ test('contact details are redacted before approval', () => {
   const ok = redactContactDetails('I can come at 3pm, the job is about 2 hours');
   assert.equal(ok.redacted, false);
 });
+
+// ---------- Section 12 (ads) ----------
+import { clickThroughRate, nextCampaignStatus, priceCampaign } from '../src/domain/ads.ts';
+
+test('ad slot pricing is per day and bounded', () => {
+  assert.deepEqual(priceCampaign('sponsored_search', 7, S.adSlotPricePerDayMinor, S.adMaxCampaignDays), { priceMinor: 70_000 * N });
+  assert.deepEqual(priceCampaign('deals_brand', 0, S.adSlotPricePerDayMinor, 90), { error: 'INVALID_DURATION' });
+  assert.deepEqual(priceCampaign('deals_brand', 91, S.adSlotPricePerDayMinor, 90), { error: 'INVALID_DURATION' });
+});
+
+test('campaigns go live only when approved, paid and in window', () => {
+  const base = { status: 'approved', paymentStatus: 'paid' as const, startsAt: new Date(now.getTime() - DAY), endsAt: new Date(now.getTime() + DAY) };
+  assert.equal(nextCampaignStatus(base, now), 'active');
+  assert.equal(nextCampaignStatus({ ...base, paymentStatus: 'unpaid' }, now), 'approved');
+  assert.equal(nextCampaignStatus({ ...base, startsAt: new Date(now.getTime() + DAY) }, now), 'approved');
+  assert.equal(nextCampaignStatus({ ...base, status: 'active', endsAt: new Date(now.getTime() - 1) }, now), 'ended');
+  assert.equal(nextCampaignStatus({ ...base, status: 'pending_review' }, now), 'pending_review');
+  assert.equal(nextCampaignStatus({ ...base, status: 'paused' }, now), 'paused');
+  assert.equal(clickThroughRate(1000, 25), 2.5);
+  assert.equal(clickThroughRate(0, 0), null);
+});
+
+// ---------- Admin setting validation ----------
+import { SETTING_SCHEMAS } from '../src/domain/settingsSchema.ts';
+import { overlaps } from '../src/domain/boosts.ts';
+
+test('default structured settings pass their own validation', () => {
+  for (const [key, schema] of Object.entries(SETTING_SCHEMAS)) {
+    const r = schema.safeParse((S as any)[key]);
+    assert.ok(r.success, `${key}: ${JSON.stringify(r.error?.issues)}`);
+  }
+});
+
+test('broken tier tables and timelines are rejected', () => {
+  const gap = [...S.walletBonusTiers];
+  gap[1] = { ...gap[1], minTopupMinor: gap[1].minTopupMinor + 100 };
+  assert.equal(SETTING_SCHEMAS.walletBonusTiers.safeParse(gap).success, false);
+  assert.equal(SETTING_SCHEMAS.multiplierTiers.safeParse(S.multiplierTiers.filter((t) => t.minRating !== 0)).success, false);
+  assert.equal(SETTING_SCHEMAS.priceChallengeFastTrack.safeParse({ ...S.priceChallengeFastTrack, escalateAtHours: 30 }).success, false);
+});
+
+test('boost windows overlap check', () => {
+  const h = 3_600_000;
+  const a = { startsAt: now, endsAt: new Date(now.getTime() + 4 * h) };
+  assert.equal(overlaps(a, { startsAt: new Date(now.getTime() + 4 * h), endsAt: new Date(now.getTime() + 5 * h) }), false);
+  assert.equal(overlaps(a, { startsAt: new Date(now.getTime() + 3 * h), endsAt: new Date(now.getTime() + 5 * h) }), true);
+});

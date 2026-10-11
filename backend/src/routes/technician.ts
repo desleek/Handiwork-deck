@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Router } from 'express';
 import { z } from 'zod';
 import { one, query, tx } from '../db/pool.ts';
-import { checkBoostEligibility, canSendAlertToday, priceProfileBoost } from '../domain/boosts.ts';
+import { BOOST_DENIAL_TEXT, checkBoostEligibility, canSendAlertToday, priceProfileBoost } from '../domain/boosts.ts';
 import { canSwitchStance } from '../domain/laborOnly.ts';
 import { multiplierContext } from '../domain/ratings.ts';
 import { badRequest, conflict, forbidden, notFound, parse } from '../lib/http.ts';
@@ -251,6 +251,12 @@ technician.get('/earnings', async (req, res) => {
 // ---------------------------------------------------------------------------
 
 async function eligibilityOrThrow(userId: string) {
+  const r = await evaluateEligibility(userId);
+  if (r.denial) throw forbidden(r.denial, BOOST_DENIAL_TEXT[r.denial]);
+  return { s: r.s, rating: r.rating };
+}
+
+async function evaluateEligibility(userId: string) {
   const s = await getSettings();
   const p = await one<any>('SELECT rating_avg, boost_privileges_suspended, verification_status FROM technician_profiles WHERE user_id = $1', [userId]);
   const restricted = isRestricted(await activeRestrictions(userId), 'purchase_boost', new Date());
@@ -262,9 +268,52 @@ async function eligibilityOrThrow(userId: string) {
     restricted,
     verified: p.verification_status === 'verified',
   });
-  if (denial) throw forbidden(denial, `Not eligible to purchase a boost (${denial})`);
-  return { s, rating: Number(p.rating_avg) };
+  return { s, rating: Number(p.rating_avg), denial };
 }
+
+/** Price and eligibility preview shown before a technician pays for a boost or alert. */
+technician.get('/boosts/quote', async (req, res) => {
+  const q = parse(
+    z.object({
+      categoryId: z.string().uuid().optional(),
+      hours: z.coerce.number().int().min(1).max(168).default(1),
+      startsAt: z.coerce.date().optional(),
+      ratePerHourMinor: z.coerce.number().int().positive().optional(),
+    }),
+    req.query,
+  );
+  const { s, denial } = await evaluateEligibility(req.user!.id);
+  const rate = q.ratePerHourMinor ?? s.boostMaxRatePerHourMinor;
+  const priced = priceProfileBoost({ ratePerHourMinor: rate, hours: q.hours, capMinor: s.boostMaxRatePerHourMinor, mode: s.boostPricingMode });
+  const startsAt = q.startsAt && q.startsAt > new Date() ? q.startsAt : new Date();
+  const sentToday = await one<{ n: number }>(
+    `SELECT count(*)::int AS n FROM push_alert_sends WHERE technician_id = $1 AND status IN ('sent', 'pending_payment') AND created_at > now() - interval '24 hours'`,
+    [req.user!.id],
+  );
+  const conflicting = q.categoryId
+    ? await one<{ ends_at: Date }>(
+        `SELECT ends_at FROM boosts WHERE technician_id = $1 AND category_id = $2 AND status IN ('pending_payment', 'scheduled', 'active')
+           AND starts_at < $4 AND ends_at > $3 ORDER BY ends_at DESC LIMIT 1`,
+        [req.user!.id, q.categoryId, startsAt, new Date(startsAt.getTime() + q.hours * 3_600_000)],
+      )
+    : undefined;
+  res.json({
+    eligible: !denial,
+    reason: denial ? BOOST_DENIAL_TEXT[denial] : null,
+    boost: {
+      pricingMode: s.boostPricingMode,
+      maxRatePerHourMinor: s.boostMaxRatePerHourMinor,
+      ratePerHourMinor: rate,
+      hours: q.hours,
+      totalMinor: 'error' in priced ? null : priced.totalMinor,
+      error: 'error' in priced ? BOOST_DENIAL_TEXT[priced.error] : null,
+      startsAt,
+      endsAt: new Date(startsAt.getTime() + q.hours * 3_600_000),
+      overlapsExistingUntil: conflicting?.ends_at ?? null,
+    },
+    alert: { feeMinor: s.pushAlertFeeMinor, remainingToday: Math.max(0, s.pushAlertMaxPerDay - sentToday!.n), maxPerDay: s.pushAlertMaxPerDay },
+  });
+});
 
 technician.post('/boosts', async (req, res) => {
   const b = parse(
@@ -285,6 +334,12 @@ technician.post('/boosts', async (req, res) => {
   if ('error' in priced) throw badRequest(priced.error, 'Invalid boost rate');
   const startsAt = b.startsAt && b.startsAt > new Date() ? b.startsAt : new Date();
   const endsAt = new Date(startsAt.getTime() + b.hours * 3_600_000);
+  const clash = await one<{ ends_at: Date }>(
+    `SELECT ends_at FROM boosts WHERE technician_id = $1 AND category_id = $2 AND status IN ('pending_payment', 'scheduled', 'active')
+       AND starts_at < $4 AND ends_at > $3 LIMIT 1`,
+    [req.user!.id, b.categoryId, startsAt, endsAt],
+  );
+  if (clash) throw conflict('BOOST_OVERLAP', `You already have a boost in this category until ${clash.ends_at.toISOString()}. Schedule the next one after it ends.`);
   const boost = await one<{ id: string }>(
     `INSERT INTO boosts (technician_id, category_id, rate_per_hour_minor, hours, total_minor, starts_at, ends_at, rating_at_purchase)
      VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
@@ -313,7 +368,7 @@ technician.post('/push-alerts', async (req, res) => {
     [req.user!.id],
   );
   if (!canSendAlertToday(sent!.n, s.pushAlertMaxPerDay)) {
-    throw conflict('DAILY_ALERT_LIMIT', `You can send up to ${s.pushAlertMaxPerDay} availability alerts per day`);
+    throw conflict('DAILY_ALERT_LIMIT', BOOST_DENIAL_TEXT.DAILY_ALERT_LIMIT);
   }
   const alertId = randomUUID();
   await query(

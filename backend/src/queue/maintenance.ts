@@ -95,13 +95,14 @@ export async function expireRestrictions() {
 }
 
 /** Section 7a: bi-weekly multiplier recalculation; only future quotes are affected. */
-export async function recalcMultipliers() {
+export async function recalcMultipliers(opts: { force?: boolean } = {}) {
   const s = await getSettings();
   if (!s.features.performanceMultiplier) return { skipped: 'feature disabled' };
+  // `force` (admin "recalculate now") ignores the cycle; the nightly job only picks up technicians due this cycle.
   const due = await query<{ user_id: string; performance_multiplier_bps: number; multiplier_updated_at: Date | null }>(
     `SELECT user_id, performance_multiplier_bps, multiplier_updated_at FROM technician_profiles
-      WHERE multiplier_updated_at IS NULL OR multiplier_updated_at < now() - make_interval(days => $1)`,
-    [s.multiplierCycleDays],
+      WHERE $2 OR multiplier_updated_at IS NULL OR multiplier_updated_at < now() - make_interval(days => $1)`,
+    [s.multiplierCycleDays, !!opts.force],
   );
   for (const t of due) {
     await tx(async (db) => {
@@ -140,6 +141,12 @@ export async function recalcMultipliers() {
 export async function boostLifecycle() {
   await query(`UPDATE boosts SET status = 'active' WHERE status = 'scheduled' AND starts_at <= now()`);
   await query(`UPDATE boosts SET status = 'ended' WHERE status IN ('scheduled', 'active') AND ends_at <= now()`);
+  // Checkouts abandoned for 30+ minutes release the slot (and stop counting toward daily alert limits).
+  await query(
+    `UPDATE boosts SET status = 'cancelled', cancelled_reason = 'payment_not_completed'
+      WHERE status = 'pending_payment' AND created_at < now() - interval '30 minutes'`,
+  );
+  await query(`UPDATE push_alert_sends SET status = 'failed' WHERE status = 'pending_payment' AND created_at < now() - interval '30 minutes'`);
 }
 
 /** Section 16b: one fixed-template push to nearby customers interested in the category. */

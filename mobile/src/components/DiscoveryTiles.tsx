@@ -1,7 +1,9 @@
 import { MaterialCommunityIcons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import * as WebBrowser from 'expo-web-browser';
+import { useEffect } from 'react';
 import { Pressable, View } from 'react-native';
+import { trackClick, trackImpression } from '../lib/adTracking';
 import type { DiscoveryItem } from '../api/types';
 import { formatMoney } from '../lib/money';
 import { useTheme } from '../theme';
@@ -56,9 +58,13 @@ export function TechnicianTile({ item, onPress }: { item: Tech; onPress: () => v
 /** Visually distinct from technician tiles so an ad can never be mistaken for a match (Sections 12, 14). */
 export function SponsoredTile({ item }: { item: Sponsored }) {
   const t = useTheme();
+  useEffect(() => trackImpression(item.ad.id), [item.ad.id]);
   return (
     <Pressable
-      onPress={() => item.ad.click_url && WebBrowser.openBrowserAsync(item.ad.click_url)}
+      onPress={() => {
+        trackClick(item.ad.id);
+        if (item.ad.click_url) WebBrowser.openBrowserAsync(item.ad.click_url);
+      }}
       style={{ flex: 1, backgroundColor: t.color.sponsoredBg, borderRadius: t.radius.md, borderWidth: 1, borderStyle: 'dashed', borderColor: t.color.border, padding: t.space(3), gap: 6 }}
     >
       <Tag label="Sponsored" tone="neutral" />

@@ -31,6 +31,24 @@ export function checkBoostEligibility(p: {
   return null;
 }
 
+/** Plain-language reasons shown in the app (never "error codes" to a technician). */
+export const BOOST_DENIAL_TEXT: Record<BoostDenial, string> = {
+  FEATURE_DISABLED: 'Promotions are not available yet.',
+  NOT_VERIFIED: 'Your account needs to be verified first.',
+  PRIVILEGES_SUSPENDED: 'Promotions are paused on your account while it is under review.',
+  ACCOUNT_RESTRICTED: 'Promotions are paused while your account is restricted.',
+  NO_RATING_YET: 'Complete a few jobs and get rated to unlock promotions.',
+  RATING_BELOW_THRESHOLD: 'Promotions unlock once your rolling rating reaches the minimum (3★ by default).',
+  RATE_ABOVE_CAP: 'That rate is above the maximum allowed.',
+  RATE_NOT_FLAT: 'Boosts are sold at the standard hourly rate.',
+  DAILY_ALERT_LIMIT: 'You have used all of today\'s availability alerts.',
+};
+
+/** Two boosts for the same technician and category may not overlap in time. */
+export function overlaps(a: { startsAt: Date; endsAt: Date }, b: { startsAt: Date; endsAt: Date }): boolean {
+  return a.startsAt < b.endsAt && b.startsAt < a.endsAt;
+}
+
 export function priceProfileBoost(p: {
   ratePerHourMinor: number;
   hours: number;

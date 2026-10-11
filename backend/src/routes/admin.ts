@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { one, query, tx } from '../db/pool.ts';
 import { slugify } from '../db/seedCategories.ts';
 import { DEFAULT_SETTINGS, type SettingKey } from '../domain/settings.ts';
+import { SETTING_SCHEMAS } from '../domain/settingsSchema.ts';
 import { badRequest, conflict, notFound, parse } from '../lib/http.ts';
 import { authenticate, requireUser } from '../middleware/auth.ts';
 import { schedulePriceChallenge } from '../queue/queues.ts';
@@ -11,6 +12,9 @@ import { notify } from '../services/notifications/notify.ts';
 import { captureJobPayment, refundPayment } from '../services/payments/escrow.ts';
 import { addOrganicSeller } from '../services/priceChallenges.ts';
 import { refreshTechnicianRating } from '../services/ratings.ts';
+import { averageJobValue, bonusEconomicsReport, unfundedWarnings } from '../services/economics.ts';
+import { campaignStats, markCampaignPaid, refreshCampaignStatuses } from '../services/ads.ts';
+import { clickThroughRate } from '../domain/ads.ts';
 import { getSettings, updateSetting } from '../services/settings.ts';
 import { postLedger } from '../services/wallet.ts';
 
@@ -36,8 +40,19 @@ admin.put('/settings/:key', async (req, res) => {
   if (typeof b.value !== typeof def || Array.isArray(b.value) !== Array.isArray(def)) {
     throw badRequest('TYPE_MISMATCH', `Setting ${key} expects a ${Array.isArray(def) ? 'list' : typeof def}`);
   }
+  const schema = SETTING_SCHEMAS[key];
+  if (schema) {
+    const r = schema.safeParse(b.value);
+    if (!r.success) throw badRequest('INVALID_SETTING', r.error.issues.map((i) => i.message).join('; '), r.error.flatten());
+  }
   await tx((db) => updateSetting(key, b.value, req.user!.id, b.reason, db));
-  res.json({ key, value: b.value });
+  // Section 15: bonuses must be funded by processing savings — warn (don't block) if a change breaks that.
+  let warnings: string[] = [];
+  if (key === 'walletBonusTiers' || key === 'gatewayFeeSchedules' || key === 'economicsAvgJobMinor') {
+    const s = await getSettings();
+    warnings = unfundedWarnings(s.walletBonusTiers, s, (await averageJobValue(s)).avgJobMinor);
+  }
+  res.json({ key, value: b.value, warnings });
 });
 
 // ---------------------------------------------------------------- categories
@@ -394,6 +409,14 @@ admin.get('/multiplier-anomalies', async (_req, res) => {
   res.json(await query(`SELECT m.*, u.full_name FROM multiplier_history m JOIN users u ON u.id = m.technician_id WHERE m.review_status = 'pending' ORDER BY m.computed_at`));
 });
 
+/** Run the performance-multiplier recalculation now instead of waiting for the nightly job (Section 7a). */
+admin.post('/multiplier/recalculate', async (req, res) => {
+  const { recalcMultipliers } = await import('../queue/maintenance.ts');
+  const r = await recalcMultipliers({ force: true });
+  await audit(undefined, req.user!.id, 'multiplier.recalculate', 'system', 'all', r);
+  res.json(r);
+});
+
 admin.post('/multiplier-anomalies/:id', async (req, res) => {
   const b = parse(z.object({ action: z.enum(['confirm', 'override']), overrideBps: z.number().int().min(-5000).max(5000).optional(), reason: z.string().min(3) }), req.body);
   await tx(async (db) => {
@@ -438,6 +461,19 @@ admin.get('/wallet-bonus/candidates', async (req, res) => {
   );
 });
 
+/** Bonus tiers modelled against gateway fee schedules, plus realised 90-day margin (Section 15). */
+admin.get('/wallet-bonus/economics', async (req, res) => {
+  const q = parse(
+    z.object({
+      provider: z.string().optional(),
+      avgJobMinor: z.coerce.number().int().positive().optional(),
+      channel: z.enum(['card', 'bank_transfer', 'ussd', 'virtual_account']).optional(),
+    }),
+    req.query,
+  );
+  res.json(await bonusEconomicsReport(await getSettings(), q));
+});
+
 admin.post('/wallet-bonus/extensions', async (req, res) => {
   const b = parse(z.object({ scope: z.enum(['single', 'cohort', 'global']), userIds: z.array(uuid).default([]), until: z.coerce.date(), reason: z.string().min(5).max(500) }), req.body);
   if (b.until <= new Date()) throw badRequest('PAST_DATE', 'Extension must end in the future');
@@ -474,7 +510,81 @@ admin.post('/reports/:id', async (req, res) => {
 });
 
 // ---------------------------------------------------------------- ads (12) — admin-managed to start
-admin.get('/ads', async (_req, res) => res.json(await query(`SELECT c.*, (SELECT json_agg(cr.*) FROM ad_creatives cr WHERE cr.campaign_id = c.id) AS creatives FROM ad_campaigns c ORDER BY created_at DESC`)));
+admin.get('/ads', async (req, res) => {
+  const q = parse(z.object({ status: z.string().optional() }), req.query);
+  const rows = await query<any>(
+    `SELECT c.*, u.full_name AS advertiser_name, ap.company_name,
+            (SELECT json_agg(cr.* ORDER BY cr.created_at DESC) FROM ad_creatives cr WHERE cr.campaign_id = c.id) AS creatives
+       FROM ad_campaigns c LEFT JOIN users u ON u.id = c.advertiser_id LEFT JOIN advertiser_profiles ap ON ap.user_id = c.advertiser_id
+      WHERE ($1::text IS NULL OR c.status = $1) ORDER BY c.status = 'pending_review' DESC, c.created_at DESC`,
+    [q.status ?? null],
+  );
+  const stats = await campaignStats(rows.map((r) => r.id));
+  res.json(rows.map((r) => {
+    const st = stats.get(r.id) ?? { impressions: 0, clicks: 0 };
+    return { ...r, ...st, ctrPct: clickThroughRate(st.impressions, st.clicks) };
+  }));
+});
+
+/** Approve or reject an advertiser submission (Section 12). */
+admin.post('/ads/:id/review', async (req, res) => {
+  const b = parse(z.object({ approve: z.boolean(), reason: z.string().max(500).optional(), waiveFee: z.boolean().default(false) }), req.body);
+  if (!b.approve && !b.reason) throw badRequest('REASON_REQUIRED', 'Give the advertiser a reason for rejection');
+  const c = await tx(async (db) => {
+    const camp = await one<any>(`SELECT * FROM ad_campaigns WHERE id = $1 AND status = 'pending_review' FOR UPDATE`, [parse(uuid, req.params.id)], db);
+    if (!camp) throw notFound('Campaign awaiting review');
+    await query(
+      `UPDATE ad_campaigns SET status = $2, rejection_reason = $3, reviewed_by = $4, reviewed_at = now(), updated_at = now(),
+         payment_status = CASE WHEN $5 THEN 'waived' ELSE payment_status END WHERE id = $1`,
+      [camp.id, b.approve ? 'approved' : 'rejected', b.approve ? null : b.reason, req.user!.id, b.approve && b.waiveFee],
+      db,
+    );
+    await refreshCampaignStatuses(db);
+    await audit(db, req.user!.id, b.approve ? 'ad.approve' : 'ad.reject', 'ad_campaign', camp.id, b, b.reason);
+    return camp;
+  });
+  if (c.advertiser_id) {
+    await notify({
+      userId: c.advertiser_id,
+      type: 'ad.reviewed',
+      title: b.approve ? 'Campaign approved' : 'Campaign not approved',
+      body: b.approve ? (b.waiveFee ? `"${c.name}" will go live on its start date.` : `"${c.name}" is approved. Pay to schedule it.`) : b.reason!,
+      channels: ['push', 'email'],
+    });
+  }
+  res.json({ ok: true });
+});
+
+/** Record an offline (invoice / bank) payment for an admin-managed campaign. */
+admin.post('/ads/:id/record-payment', async (req, res) => {
+  const b = parse(z.object({ amountMinor: z.number().int().positive(), reference: z.string().min(3).max(100) }), req.body);
+  await tx(async (db) => {
+    const camp = await one<any>(`SELECT * FROM ad_campaigns WHERE id = $1 FOR UPDATE`, [parse(uuid, req.params.id)], db);
+    if (!camp) throw notFound('Campaign');
+    const p = await one<{ id: string }>(
+      `INSERT INTO payments (payer_id, purpose, channel, provider, provider_ref, amount_minor, status, captured_at, metadata)
+       VALUES ($1, 'ad_campaign', 'bank_transfer', 'offline', $2, $3, 'captured', now(), $4) RETURNING id`,
+      [camp.advertiser_id ?? req.user!.id, `offline:${b.reference}`, b.amountMinor, JSON.stringify({ campaignId: camp.id, recordedBy: req.user!.id })],
+      db,
+    );
+    await markCampaignPaid(db, camp.id, p!.id, b.amountMinor);
+    await audit(db, req.user!.id, 'ad.record_payment', 'ad_campaign', camp.id, b);
+  });
+  res.json({ ok: true });
+});
+
+/** Create an advertiser account (advertisers start admin-managed). */
+admin.post('/advertisers', async (req, res) => {
+  const b = parse(z.object({ companyName: z.string().min(2), contactEmail: z.string().email().optional(), contactPhone: z.string().optional(), sellerId: uuid.optional() }), req.body);
+  const u = await tx(async (db) => {
+    const user = await one(`INSERT INTO users (role, full_name, email, phone_e164) VALUES ('advertiser', $1, $2, $3) RETURNING id, full_name`, [b.companyName, b.contactEmail ?? null, b.contactPhone ?? null], db);
+    await query('INSERT INTO wallets (user_id) VALUES ($1)', [user.id], db);
+    await query(`INSERT INTO advertiser_profiles (user_id, company_name, contact_email, contact_phone, seller_id) VALUES ($1,$2,$3,$4,$5)`, [user.id, b.companyName, b.contactEmail ?? null, b.contactPhone ?? null, b.sellerId ?? null], db);
+    await audit(db, req.user!.id, 'advertiser.create', 'user', user.id, b);
+    return user;
+  });
+  res.status(201).json(u);
+});
 admin.post('/ads', async (req, res) => {
   const b = parse(
     z.object({
@@ -486,24 +596,36 @@ admin.post('/ads', async (req, res) => {
       startsAt: z.coerce.date().optional(),
       endsAt: z.coerce.date().optional(),
       creative: z.object({ title: z.string().min(2).max(80), body: z.string().max(200).optional(), imageUrl: z.string().url(), clickUrl: z.string().url().optional() }),
+      waiveFee: z.boolean().default(false),
     }),
     req.body,
   );
   const c = await tx(async (db) => {
+    // Admin-managed campaigns are approved on creation; they go live once paid (record-payment) or waived.
     const camp = await one(
-      `INSERT INTO ad_campaigns (seller_id, name, placement, target_category_ids, slot_price_minor, starts_at, ends_at, status, reviewed_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,'approved',$8) RETURNING *`,
-      [b.sellerId ?? null, b.name, b.placement, b.targetCategoryIds, b.slotPriceMinor ?? null, b.startsAt ?? null, b.endsAt ?? null, req.user!.id],
+      `INSERT INTO ad_campaigns (seller_id, name, placement, target_category_ids, slot_price_minor, starts_at, ends_at, status, reviewed_by, reviewed_at,
+          payment_status)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,'approved',$8, now(), $9) RETURNING *`,
+      [b.sellerId ?? null, b.name, b.placement, b.targetCategoryIds, b.slotPriceMinor ?? null, b.startsAt ?? null, b.endsAt ?? null, req.user!.id, b.waiveFee ? 'waived' : 'unpaid'],
       db,
     );
     await query(`INSERT INTO ad_creatives (campaign_id, title, body, image_url, click_url) VALUES ($1,$2,$3,$4,$5)`, [camp.id, b.creative.title, b.creative.body ?? null, b.creative.imageUrl, b.creative.clickUrl ?? null], db);
+    await refreshCampaignStatuses(db);
     return camp;
   });
   res.status(201).json(c);
 });
+/** Pause / resume / end a campaign. Resuming goes back through the normal paid + in-window check. */
 admin.patch('/ads/:id', async (req, res) => {
-  const b = parse(z.object({ status: z.enum(['approved', 'rejected', 'active', 'paused', 'ended']) }), req.body);
-  res.json(await one('UPDATE ad_campaigns SET status = $2, reviewed_by = $3 WHERE id = $1 RETURNING *', [req.params.id, b.status, req.user!.id]));
+  const b = parse(z.object({ status: z.enum(['paused', 'approved', 'ended']), reason: z.string().max(500).optional() }), req.body);
+  const c = await tx(async (db) => {
+    const r = await one('UPDATE ad_campaigns SET status = $2, updated_at = now() WHERE id = $1 RETURNING *', [parse(uuid, req.params.id), b.status], db);
+    if (!r) throw notFound('Campaign');
+    await refreshCampaignStatuses(db);
+    await audit(db, req.user!.id, `ad.${b.status}`, 'ad_campaign', r.id, b, b.reason);
+    return r;
+  });
+  res.json(c);
 });
 
 // ---------------------------------------------------------------- live boost monitoring (16)
@@ -521,14 +643,15 @@ admin.get('/boosts', async (_req, res) => {
 admin.get('/analytics', async (req, res) => {
   const q = parse(z.object({ days: z.coerce.number().int().min(1).max(365).default(30) }), req.query);
   const p = [q.days];
-  const [gmvByChannel, revenue, categoryDemand, rates, wallet, withdrawals, traction] = await Promise.all([
+  const [gmvByChannel, revenue, categoryDemand, rates, wallet, withdrawals, traction, ads] = await Promise.all([
     query(`SELECT channel, provider, count(*)::int AS payments, sum(amount_minor)::bigint AS gmv_minor FROM payments
             WHERE purpose = 'job' AND status IN ('held', 'captured') AND created_at > now() - make_interval(days => $1) GROUP BY 1, 2 ORDER BY 4 DESC`, p),
     one(`SELECT
            COALESCE(sum(amount_minor) FILTER (WHERE component = 'labor_commission'), 0)::bigint AS labor_commission_minor,
            COALESCE(sum(amount_minor) FILTER (WHERE component = 'markup_commission'), 0)::bigint AS markup_commission_minor,
            COALESCE(sum(amount_minor) FILTER (WHERE component = 'boost'), 0)::bigint AS boost_revenue_minor,
-           COALESCE(sum(amount_minor) FILTER (WHERE component = 'push_alert'), 0)::bigint AS push_alert_revenue_minor
+           COALESCE(sum(amount_minor) FILTER (WHERE component = 'push_alert'), 0)::bigint AS push_alert_revenue_minor,
+           COALESCE(sum(amount_minor) FILTER (WHERE component = 'ad'), 0)::bigint AS ad_revenue_minor
          FROM payment_splits WHERE recipient = 'platform' AND created_at > now() - make_interval(days => $1)`, p),
     query(`SELECT c.name, count(*)::int AS jobs FROM jobs j JOIN service_categories c ON c.id = j.category_id
             WHERE j.created_at > now() - make_interval(days => $1) GROUP BY 1 ORDER BY 2 DESC LIMIT 25`, p),
@@ -550,8 +673,11 @@ admin.get('/analytics', async (req, res) => {
                 (SELECT count(*) FROM jobs WHERE status = 'completed' AND completed_at > now() - interval '30 days')::int AS completed_jobs_30d,
                 (SELECT count(*) FROM parts_sellers WHERE verification_status = 'verified')::int AS verified_sellers,
                 (SELECT count(*) FROM supplies_waitlist)::int AS supplies_waitlist`),
+    one(`SELECT count(*) FILTER (WHERE type = 'impression')::int AS impressions, count(*) FILTER (WHERE type = 'click')::int AS clicks,
+                (SELECT count(*) FROM ad_campaigns WHERE status = 'active')::int AS active_campaigns
+           FROM ad_events WHERE created_at > now() - make_interval(days => $1)`, p),
   ]);
-  res.json({ days: q.days, gmvByChannel, revenue, categoryDemand, rates, wallet, withdrawals, traction });
+  res.json({ days: q.days, gmvByChannel, revenue, categoryDemand, rates, wallet, withdrawals, traction, ads: { ...ads, ctrPct: clickThroughRate(ads.impressions, ads.clicks) } });
 });
 
 admin.get('/jobs/:id', async (req, res) => {

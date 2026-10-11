@@ -165,6 +165,12 @@ export async function onPaymentSucceeded(paymentId: string, feeMinor: number | n
         }
         break;
       }
+      case 'ad_campaign': {
+        await query(`UPDATE payments SET status = 'captured', captured_at = now() WHERE id = $1`, [paymentId], db);
+        const { markCampaignPaid } = await import('../ads.ts'); // ads stay a bolt-on module
+        if (p.metadata?.campaignId) await markCampaignPaid(db, p.metadata.campaignId, paymentId, p.amount_minor);
+        break;
+      }
       default:
         break;
     }
