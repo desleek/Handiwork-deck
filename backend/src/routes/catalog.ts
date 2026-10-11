@@ -132,7 +132,8 @@ catalog.get('/technicians/:id', authenticate, requireUser(), async (req, res) =>
   const s = await getSettings();
   const t = await one<any>(
     `SELECT u.id, u.full_name, u.avatar_url, t.bio, t.rating_avg, t.rating_count, t.is_online,
-            t.performance_multiplier_bps, t.coverage_radius_km, t.verification_status
+            t.performance_multiplier_bps, t.coverage_radius_km, t.verification_status,
+            (SELECT count(*)::int FROM jobs j WHERE j.technician_id = t.user_id AND j.status = 'completed') AS completed_jobs
        FROM technician_profiles t JOIN users u ON u.id = t.user_id
       WHERE t.user_id = $1 AND u.status IN ('active', 'restricted') AND t.verification_status = 'verified'`,
     [id],
@@ -177,6 +178,7 @@ catalog.get('/technicians/:id', authenticate, requireUser(), async (req, res) =>
     ratingAvg: t.rating_avg,
     ratingCount: t.rating_count,
     isOnline: t.is_online,
+    completedJobs: t.completed_jobs,
     categories: categories.map((c: any) => ({
       ...c,
       startingPriceMinor: applyMultiplier(c.starting_price_minor, multiplierBps),

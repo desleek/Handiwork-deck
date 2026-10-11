@@ -96,8 +96,11 @@ In dev mode, send `x-dev-user-id: <uuid>` instead of a Firebase token. The seede
 cd mobile
 npm install
 npx expo install --fix               # aligns versions to the Expo SDK you have
+npx expo install expo-font @expo-google-fonts/bricolage-grotesque @expo-google-fonts/figtree   # brand fonts, pinned to your SDK
 EXPO_PUBLIC_AUTH_MODE=dev EXPO_PUBLIC_API_URL=http://<your-LAN-IP>:4000 npx expo run:android   # or run:ios
 ```
+
+The app's look (green and marigold, Bricolage Grotesque headings, Figtree body) lives in `mobile/src/theme.ts` and `mobile/src/components/ui.tsx`. If the font files can't load, the app falls back to system fonts rather than failing.
 
 The app uses native modules (Firebase, maps, background location), so it runs in a development build, not Expo Go. For production, add `google-services.json` and `GoogleService-Info.plist` from your Firebase project, then `eas build`. Test on physical devices via TestFlight and the Play internal testing track before submitting.
 

@@ -9,12 +9,16 @@ export default function TechnicianTabs() {
     <Tabs
       screenOptions={{
         tabBarActiveTintColor: t.color.primary,
+        tabBarInactiveTintColor: t.color.textMuted,
         tabBarStyle: { backgroundColor: t.color.surface, borderTopColor: t.color.border },
+        tabBarLabelStyle: { ...t.font.tiny, fontSize: 11 },
+        headerTitleStyle: t.font.heading,
+        headerShadowVisible: false,
         headerStyle: { backgroundColor: t.color.surface },
         headerTintColor: t.color.text,
       }}
     >
-      <Tabs.Screen name="index" options={{ title: 'Jobs', tabBarIcon: icon('clipboard-text-outline') }} />
+      <Tabs.Screen name="index" options={{ title: 'Jobs', headerShown: false, tabBarIcon: icon('tray-arrow-down') }} />
       <Tabs.Screen name="earnings" options={{ title: 'Earnings', tabBarIcon: icon('chart-line') }} />
       <Tabs.Screen name="profile" options={{ title: 'Profile', tabBarIcon: icon('storefront-outline') }} />
       <Tabs.Screen name="wallet" options={{ title: 'Wallet', tabBarIcon: icon('wallet-outline') }} />

@@ -92,6 +92,9 @@ export interface JobSummary {
   short_code: string;
   status: JobStatus;
   is_fast_track: boolean;
+  kind?: 'standard' | 'construction';
+  booking_type?: 'instant' | 'request';
+  scheduled_for?: string | null;
   description: string;
   category_name: string;
   category_icon: string;

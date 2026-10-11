@@ -8,7 +8,7 @@ import type { JobDetail } from '../../../src/api/types';
 import { ConstructionPanel } from '../../../src/components/ConstructionPanel';
 import { PriceBreakdown } from '../../../src/components/PriceBreakdown';
 import { Stars } from '../../../src/components/StarInput';
-import { Banner, Button, Card, Loading, Row, Screen, T, Tag, useChoiceSheet } from '../../../src/components/ui';
+import { Banner, Button, Card, Loading, Note, Row, Screen, ScreenHeader, T, Tag, useChoiceSheet } from '../../../src/components/ui';
 import { formatMoney, toMinor } from '../../../src/lib/money';
 import { queryClient } from '../../../src/lib/offline';
 import { useTheme } from '../../../src/theme';
@@ -54,6 +54,16 @@ export default function JobScreen() {
     onError: (e: ApiError) => Alert.alert('Could not complete that', e.message),
   });
   const run = (path: string, body?: unknown) => act.mutate({ path, body });
+  // "Approve & pay" is one tap for the customer: approve the quote, then go straight to payment.
+  const approveAndPay = useMutation({
+    mutationFn: () => api(`/jobs/${id}/approve`, { body: {} }),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({ queryKey: ['job', id] });
+      queryClient.invalidateQueries({ queryKey: ['jobs'] });
+      router.push(`/job/${id}/pay`);
+    },
+    onError: (e: ApiError) => Alert.alert('Could not approve the quote', e.message),
+  });
 
   if (isLoading || !job) return <Loading />;
   const isCustomer = job.viewer === 'customer';
@@ -63,17 +73,47 @@ export default function JobScreen() {
   const pendingLaborOnly = job.laborOnlyRequests.find((r) => r.status === 'pending');
   const openChallenge = job.priceChallenges.find((c) => ['open', 'escalated', 'pending_evidence_review'].includes(c.status));
   const negotiation = job.laborNegotiation && ['pending', 'countered'].includes(job.laborNegotiation.status) ? job.laborNegotiation : null;
+  const reviewingQuote = isCustomer && job.kind !== 'construction' && job.status === 'quoted' && job.quote?.status === 'submitted';
+
+  const moreOptions = async () => {
+    const opts = [!job.quote!.laborOnly ? 'I will supply parts (labor-only)' : null, 'Offer a different labor price', 'Decline and cancel booking'].filter(Boolean) as string[];
+    const i = await sheet.open('Other ways to respond', opts, opts.length - 1);
+    if (i === null) return;
+    const choice = opts[i];
+    if (choice.startsWith('I will supply')) run('/labor-only');
+    else if (choice.startsWith('Offer')) setNote('negotiate');
+    else run('/cancel', { reason: 'Customer declined the quote' });
+  };
+
+  const footer = reviewingQuote ? (
+    <>
+      <Button title={`Approve & pay ${formatMoney(job.quote!.totals.totalMinor)}`} loading={approveAndPay.isPending} onPress={() => approveAndPay.mutate()} />
+      <Row gap={2.5}>
+        <Button style={{ flex: 1 }} size="md" kind="outline" icon="chat-outline" title="Ask a question" onPress={() => router.push(`/job/${id}/chat`)} />
+        <Button style={{ flex: 1 }} size="md" kind="outline" title="Other options" onPress={moreOptions} />
+      </Row>
+    </>
+  ) : isCustomer && job.kind !== 'construction' && job.status === 'approved' ? (
+    <Button title={`Pay ${formatMoney(job.quote?.totals.totalMinor)} securely`} icon="lock-outline" onPress={() => router.push(`/job/${id}/pay`)} />
+  ) : undefined;
 
   return (
-    <Screen>
+    <Screen
+      edges={['top', 'bottom']}
+      header={
+        <ScreenHeader
+          title={isCustomer && job.quote && ['quoted', 'negotiating'].includes(job.status) ? `Quote from ${job.technician.name.split(' ')[0]}` : job.category.name}
+          subtitle={`Job #${job.short_code} · ${job.category.name}`}
+          right={myTurn ? <Tag label="Your turn" tone="warning" /> : undefined}
+        />
+      }
+      footer={footer}
+    >
       {sheet.element}
       <Card>
         <Row style={{ justifyContent: 'space-between' }}>
-          <T v="small" muted>#{job.short_code} · {job.category.name}</T>
-          <Row gap={1}>
-            {job.is_fast_track ? <Tag label="Fast Track" tone="warning" /> : null}
-            <Tag label={STATUS_LABEL[job.status] ?? job.status} tone={job.status === 'completed' ? 'success' : 'neutral'} />
-          </Row>
+          <Tag label={STATUS_LABEL[job.status] ?? job.status} tone={job.status === 'completed' ? 'success' : job.status === 'disputed' ? 'danger' : 'neutral'} />
+          {job.is_fast_track ? <Tag label="Fast Track" tone="warning" icon="flash" /> : null}
         </Row>
         <T>{job.description}</T>
         <T v="small" muted>{job.address}</T>
@@ -140,6 +180,7 @@ export default function JobScreen() {
           <PriceBreakdown
             quote={job.quote}
             viewer={job.viewer}
+            awaitingApproval={reviewingQuote}
             onChallenge={isCustomer && ['quoted', 'negotiating'].includes(job.status) ? (lineId) => router.push({ pathname: '/job/[id]/challenge', params: { id, lineId } }) : undefined}
           />
         ) : null}
@@ -148,30 +189,15 @@ export default function JobScreen() {
         ) : null}
 
         {/* ------------------------------ Customer actions ------------------------------ */}
-        {isCustomer && job.status === 'quoted' && job.quote?.status === 'submitted' ? (
-          <Card>
-            <T v="heading">Respond to the quote</T>
-            <Button title={`Approve ${formatMoney(job.quote.totals.totalMinor)}`} loading={act.isPending} onPress={() => run('/approve')} />
-            <Button
-              title="More options"
-              kind="secondary"
-              onPress={async () => {
-                const opts = [!job.quote!.laborOnly ? 'I will supply parts (labor-only)' : null, 'Offer a different labor price', 'Cancel booking'].filter(Boolean) as string[];
-                const i = await sheet.open('Counter the quote', opts, opts.length - 1);
-                if (i === null) return;
-                const choice = opts[i];
-                if (choice.startsWith('I will supply')) run('/labor-only');
-                else if (choice.startsWith('Offer')) setNote('negotiate');
-                else run('/cancel', { reason: 'Customer cancelled at quote stage' });
-              }}
-            />
-            {note === 'negotiate' ? (
-              <View style={{ gap: t.space(2) }}>
-                <T v="small" muted>Labor is currently {formatMoney(job.quote.totals.laborMinor)}. This offer only applies to this job.</T>
-                <TextInput value={amount} onChangeText={setAmount} keyboardType="numeric" placeholder="Your labor offer (₦)" placeholderTextColor={t.color.textMuted} style={input} />
-                <Button title="Send offer" disabled={!amount} onPress={() => run('/labor-negotiation', { proposedLaborMinor: toMinor(amount) })} />
-              </View>
-            ) : null}
+        {reviewingQuote ? (
+          <Note title="You're covered." text="When you pay, the money is held by Handiwork-Deck and only released after you confirm the job is done." />
+        ) : null}
+        {reviewingQuote && note === 'negotiate' ? (
+          <Card tone="selected">
+            <T v="heading">Offer a different labor price</T>
+            <T v="small" muted>Labor is currently {formatMoney(job.quote!.totals.laborMinor)}. This offer only applies to this job.</T>
+            <TextInput value={amount} onChangeText={setAmount} keyboardType="numeric" placeholder="Your labor offer (₦)" placeholderTextColor={t.color.textMuted} style={input} accessibilityLabel="Your labor offer in naira" />
+            <Button title="Send offer" disabled={!amount} onPress={() => run('/labor-negotiation', { proposedLaborMinor: toMinor(amount) })} />
           </Card>
         ) : null}
 
@@ -196,7 +222,6 @@ export default function JobScreen() {
           </Card>
         ) : null}
 
-        {isCustomer && job.status === 'approved' ? <Button title={`Pay ${formatMoney(job.quote?.totals.totalMinor)}`} onPress={() => router.push(`/job/${id}/pay`)} /> : null}
 
         {isCustomer && job.status === 'awaiting_confirmation' ? (
           <Card>
@@ -276,7 +301,7 @@ export default function JobScreen() {
         </>
       )}
 
-      <Button title="Refresh" kind="ghost" onPress={() => refetch()} />
+      <Button title="Refresh" kind="ghost" size="md" icon="refresh" onPress={() => refetch()} />
     </Screen>
   );
 }
